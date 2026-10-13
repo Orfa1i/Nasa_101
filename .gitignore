@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# Secrets
+.env
+
+# Generated data (created by app/config.py and the ingest CLI)
+data/raw/
+data/processed/
+data/logs/
+data/mock/
