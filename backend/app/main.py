@@ -3,11 +3,16 @@
 Usage (from the repository root or from ``backend/``)::
 
     python backend/app/main.py ingest --facility Sierrita --bbox -111.12 31.83 -111.04 31.90
+    python backend/app/main.py unmix --facility Sierrita
 
 ``ingest`` runs ``download_and_crop`` for each requested product, writes the
 clipped rasters to ``DATA_DIR/processed/<facility>/``, records the run on the
 facility's feature in ``DATA_DIR/global_tailings.geojson`` and logs to
 ``DATA_DIR/logs/ingest_<run_id>.log``.
+
+``unmix`` runs the spectroscopy engine on the facility's EMIT L2A output from
+``ingest`` and writes ``DATA_DIR/cache/<Facility>_spectral.zarr`` plus an
+RMSE/validation JSON log in ``DATA_DIR/logs/``.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from shapely.geometry import box
 
 from app.config import Settings, get_settings
 from app.pipelines.ingestion import PRODUCTS, download_and_crop, validate_bbox
+from app.pipelines.unmixing import find_l2bmin_for, run_spectral_pipeline
 
 logger = logging.getLogger("lithocreep")
 
@@ -99,6 +105,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest.add_argument("--format", choices=("tif", "zarr"), default="tif", help="Output format (default: tif)")
     ingest.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+
+    unmix = sub.add_parser("unmix", help="NNLS-unmix a facility's EMIT reflectance and compute the SAI")
+    unmix.add_argument("--facility", required=True, type=_facility_name, help="Facility name, e.g. Sierrita")
+    unmix.add_argument("--input", type=Path, help="EMIT reflectance (.zarr/.tif); default: the ingest output")
+    unmix.add_argument("--output", type=Path, help="Output Zarr; default: DATA_DIR/cache/<Facility>_spectral.zarr")
+    unmix.add_argument("--l2bmin", type=Path, help="EMITL2BMIN NetCDF for validation; default: matching file in DATA_DIR/raw/EMITL2BMIN")
+    unmix.add_argument("--library", type=Path, help="USGS library extract CSV; default: splib07 extract if present, else bundled splib06a")
+    unmix.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser
 
 
@@ -223,6 +237,48 @@ def cmd_ingest(args: argparse.Namespace, parser: argparse.ArgumentParser, settin
             handler.close()
 
 
+def cmd_unmix(args: argparse.Namespace, settings: Settings) -> int:
+    slug = facility_slug(args.facility)
+    display = KNOWN_FACILITIES.get(slug, {}).get("name", args.facility)
+    run_utc = datetime.now(timezone.utc)
+    run_id = f"{slug}_{run_utc.strftime('%Y%m%dT%H%M%SZ')}"
+    handlers = configure_logging(settings.log_dir / f"unmix_{run_id}.log", args.log_level)
+    try:
+        input_path = args.input
+        if input_path is None:
+            candidates = [settings.processed_dir / slug / f"{slug}_{PRODUCT_SLUGS['EMITL2ARFL.001']}.{ext}" for ext in ("zarr", "tif")]
+            input_path = next((c for c in candidates if c.exists()), None)
+            if input_path is None:
+                logger.error("No EMIT reflectance for %s (looked for %s); run `ingest` first", display, [str(c) for c in candidates])
+                return 1
+        if not Path(input_path).exists():
+            logger.error("Input %s does not exist", input_path)
+            return 1
+
+        l2bmin = args.l2bmin
+        if l2bmin is None:
+            sidecar = Path(f"{input_path}.meta.json")
+            granule = json.loads(sidecar.read_text()).get("granule_id") if sidecar.exists() else None
+            l2bmin = find_l2bmin_for(settings.raw_dir, granule)
+        output = args.output or settings.cache_dir / f"{display}_spectral.zarr"
+        rmse_log = settings.log_dir / f"{display}_spectral_rmse_{run_id}.json"
+
+        logger.info("Run %s: unmixing %s -> %s (L2BMIN: %s)", run_id, input_path, output, l2bmin or "none")
+        try:
+            run_spectral_pipeline(
+                Path(input_path), Path(output), log_path=rmse_log, l2bmin_path=l2bmin, library_path=args.library, settings=settings
+            )
+        except Exception as exc:
+            logger.error("Unmixing failed: %s: %s", type(exc).__name__, exc)
+            return 1
+        logger.info("RMSE/validation log: %s", rmse_log)
+        return 0
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -233,6 +289,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     if args.command == "ingest":
         return cmd_ingest(args, parser, settings)
+    if args.command == "unmix":
+        return cmd_unmix(args, settings)
     parser.error(f"unknown command {args.command!r}")
     return 2
 

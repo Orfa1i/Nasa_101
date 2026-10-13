@@ -468,19 +468,26 @@ def _padded(bbox: Sequence[float], pad: float) -> tuple[float, float, float, flo
     return xmin - pad, ymin - pad, xmax + pad, ymax + pad
 
 
-def orthorectify_emit(path: Path, bbox: Sequence[float], pad: float = CLIP_PAD_DEG) -> xr.DataArray:
-    """Orthorectify the part of an EMIT L2A RFL swath that falls inside ``bbox``.
+def orthorectify_emit(
+    path: Path, bbox: Sequence[float], pad: float = CLIP_PAD_DEG, variable: str = "reflectance"
+) -> xr.DataArray:
+    """Orthorectify the part of an EMIT swath variable that falls inside ``bbox``.
 
-    EMIT NetCDFs store reflectance in sensor geometry with a geometry lookup
-    table (``location/glt_x``, ``location/glt_y``; 1-based, 0 = no data) that
-    maps each EPSG:4326 output pixel to a swath pixel. Only the GLT window that
-    covers the padded bbox is resolved, so the full 285-band scene is never
-    loaded.
+    EMIT NetCDFs store data in sensor geometry with a geometry lookup table
+    (``location/glt_x``, ``location/glt_y``; 1-based, 0 = no data) that maps
+    each EPSG:4326 output pixel to a swath pixel. Only the GLT window that
+    covers the padded bbox is resolved, so the full scene is never loaded.
+
+    ``variable`` may be 3-D ``(downtrack, crosstrack, bands)`` like L2A
+    ``reflectance`` (returned as ``(band, y, x)`` with a ``wavelength``
+    coordinate) or 2-D ``(downtrack, crosstrack)`` like the L2B MIN
+    ``group_*_band_depth`` / ``group_*_mineral_id`` layers (returned as
+    ``(y, x)``). Fill values (<= -9999) become NaN.
     """
     xmin, ymin, xmax, ymax = _padded(bbox, pad)
     with xr.open_dataset(path, engine="h5netcdf") as root, xr.open_dataset(
         path, engine="h5netcdf", group="location"
-    ) as loc, xr.open_dataset(path, engine="h5netcdf", group="sensor_band_parameters") as bands:
+    ) as loc:
         x0, dx, _, y0, _, dy = (float(v) for v in root.attrs["geotransform"])
         n_rows, n_cols = loc["glt_x"].shape
 
@@ -501,22 +508,31 @@ def orthorectify_emit(path: Path, bbox: Sequence[float], pad: float = CLIP_PAD_D
 
         src_r0, src_r1 = int(glt_y[valid].min()) - 1, int(glt_y[valid].max())
         src_c0, src_c1 = int(glt_x[valid].min()) - 1, int(glt_x[valid].max())
-        swath = root["reflectance"][src_r0:src_r1, src_c0:src_c1, :].values.astype(np.float32)
+        if variable not in root:
+            raise IngestionError(f"{path.name} has no variable {variable!r}")
+        swath = root[variable][src_r0:src_r1, src_c0:src_c1, ...].values.astype(np.float32)
         swath[swath <= -9999] = np.nan
-        wavelengths = bands["wavelengths"].values.astype(np.float32)
-
-    n_bands = swath.shape[-1]
-    ortho = np.full((n_bands, row1 - row0, col1 - col0), np.nan, dtype=np.float32)
-    ortho[:, valid] = swath[glt_y[valid] - 1 - src_r0, glt_x[valid] - 1 - src_c0, :].T
 
     x = x0 + (np.arange(col0, col1) + 0.5) * dx
     y = y0 + (np.arange(row0, row1) + 0.5) * dy
-    da = xr.DataArray(
-        ortho,
-        dims=("band", "y", "x"),
-        coords={"band": np.arange(1, n_bands + 1), "wavelength": ("band", wavelengths), "x": x, "y": y},
-        name="reflectance",
-    )
+    picked = swath[glt_y[valid] - 1 - src_r0, glt_x[valid] - 1 - src_c0, ...]
+
+    if swath.ndim == 2:
+        ortho = np.full((row1 - row0, col1 - col0), np.nan, dtype=np.float32)
+        ortho[valid] = picked
+        da = xr.DataArray(ortho, dims=("y", "x"), coords={"x": x, "y": y}, name=variable)
+    else:
+        with xr.open_dataset(path, engine="h5netcdf", group="sensor_band_parameters") as bands:
+            wavelengths = bands["wavelengths"].values.astype(np.float32)
+        n_bands = swath.shape[-1]
+        ortho = np.full((n_bands, row1 - row0, col1 - col0), np.nan, dtype=np.float32)
+        ortho[:, valid] = picked.T
+        da = xr.DataArray(
+            ortho,
+            dims=("band", "y", "x"),
+            coords={"band": np.arange(1, n_bands + 1), "wavelength": ("band", wavelengths), "x": x, "y": y},
+            name=variable,
+        )
     return da.rio.write_crs("EPSG:4326").rio.write_nodata(np.nan, encoded=False)
 
 

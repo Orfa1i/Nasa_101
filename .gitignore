@@ -13,3 +13,6 @@ data/raw/
 data/processed/
 data/logs/
 data/mock/
+
+# Generated pipeline outputs
+data/cache/*_spectral.zarr/

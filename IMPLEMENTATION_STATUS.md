@@ -5,7 +5,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Environment, configuration, CLI, Earthdata download/crop pipeline | **Done**: tests pass; the live Earthdata path has not been run against NASA (see below) |
-| 2 | Spectroscopy / NNLS unmixing | Not started |
+| 2 | Spectroscopy / NNLS unmixing | **Done**: tests pass. 245 active channels, not 242 (see below); not yet run on a real EMIT or EMITL2BMIN granule |
 | 3 | Kinematics / InSAR trend modelling | Not started |
 | 4 | Hydrology / DSWx setback and flow routing | Not started |
 | 5 | Co-anomaly coupling and regime classifier | Not started |
@@ -121,3 +121,84 @@ $ cd backend && pytest
 * **`EPSG:32612` is the default output CRS.** For bboxes outside UTM zone 12N (e.g. Brumadinho), a warning is logged. Automatic per-site UTM selection is a candidate for Phase 5 grid alignment.
 * **DISP-S1 selection.** One granule (the most recent full-coverage one) is selected. Phase 3 will need the full displacement time series, not a single overpass.
 * **`global_tailings.geojson`.** The CLI records only the bbox, name and country of the facilities it ingests. Phase 6 still needs to add mine type, embankment type, crest lines, and the Bingham Canyon entry.
+
+---
+
+## Phase 2: Spectroscopy pipeline and NNLS unmixing
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `backend/app/pipelines/unmixing.py` | The spectroscopy engine: EMIT band mapping, library loading, endmember matrix, constrained NNLS, NDVI / NDWI_SWIR / SAI, confidence and observability flags, Zarr output, RMSE log, and EMITL2BMIN spatial R². |
+| `backend/app/main.py` | New CLI command `unmix --facility NAME [--input] [--output] [--l2bmin] [--library]`. |
+| `backend/app/pipelines/ingestion.py` | `orthorectify_emit(..., variable=)` now also orthorectifies 2-D EMIT layers (the L2B `group_*` maps). The L2A behaviour is unchanged. |
+| `backend/scripts/build_reference_data.py` | Rebuilds the bundled reference files from their public sources. |
+| `data/reference/` | `emit_wavelengths_285.csv`, `usgs_splib06a_extract.csv`, `emit_l2b_mineral_grouping_matrix_20230503.csv`, and a provenance `README.md`. |
+| `backend/tests/test_unmixing.py` | 28 tests. |
+
+### Engine behaviour
+
+* **Band mapping.** The 285 EMIT channels (381.0–2492.9 nm) come from EMIT's L1B calibration (`EMIT_Wavelengths_20220817`, detector rows 20–304). A granule's own `wavelength` coordinate takes precedence when present. Channels in [1340, 1460] nm and [1790, 1970] nm are dropped.
+* **Endmembers.** Real USGS spectra are used for Jarosite, Goethite, Ferrihydrite, Montmorillonite, Gypsum, Quartz-Feldspar and Water-Shade (sample choices are in `data/reference/README.md`). They are linearly interpolated onto the active channels to give **M (245 × 7)**.
+  * The spectra stay in reflectance units, clipped to [0, 1]. They are not rescaled, so the fractions keep their meaning as areal abundances.
+  * Conditioning on the EMIT grid: condition number 341. With 0.002 reflectance noise, the mean fraction error is 0.001–0.004 for the six minerals and about 0.02 for the near-zero Water-Shade spectrum.
+* **NNLS** (`scipy.optimize.nnls`) with `f ≥ 0` and `Σf ≤ 1`:
+  1. Solve plain NNLS first. If the result already satisfies `Σf ≤ 1`, it is optimal (the problem is convex).
+  2. Otherwise re-solve with `Σf = 1` enforced by a heavily weighted augmentation row, as in FCLS, then renormalise.
+  3. Edge cases: non-finite channels are skipped. With fewer than 14 usable channels the pixel is treated as no-data.
+  4. Per-pixel `rmse` is computed over the channels used.
+* **Indices.** The nearest channels to 640, 860 and 1240 nm (≤ 15 nm away, no interpolation) are 641.3, 857.6 and 1238.1 nm. They give NDVI and NDWI_SWIR, and `SAI = 0.40 f_Jarosite + 0.30 f_Montmorillonite + 0.20 f_Goethite + 0.10 NDWI_SWIR`. Smectite is represented by montmorillonite.
+* **Masking and confidence.**
+  * `observability` flags: 0 observable, 1 `unobservable-vegetated` (NDVI > 0.35), 2 no-data, 3 poor-fit (RMSE > 0.05).
+  * `confidence = max(0, 1 − rmse/0.05)`; it is 0 for vegetated and no-data pixels.
+  * SAI is NaN for vegetated and no-data pixels.
+* **Scaling.** If a cube's maximum reflectance exceeds 1.5, it is treated as integer-scaled and divided by 10 000.
+* **Outputs.**
+  * `DATA_DIR/cache/<Facility>_spectral.zarr` (Blosc/zstd) on the **input grid**, i.e. the Phase 1 UTM 32612 grid. Variables: `abundance(endmember,y,x)`, `fraction_sum`, `rmse`, `ndvi`, `ndwi_swir`, `sai`, `confidence`, `observability`. Open it with `xr.open_zarr(path, decode_coords="all")` to recover the CRS.
+  * Input provenance (`origin` / `data_label`) is passed through, so mock inputs stay labelled.
+  * `DATA_DIR/logs/<Facility>_spectral_rmse_<run>.json` holds RMSE statistics, flag counts, mean abundances and the L2BMIN validation results.
+* **EMITL2BMIN validation.**
+  * The L2B granule is taken from `--l2bmin`, or found automatically as `DATA_DIR/raw/EMITL2BMIN/EMIT_L2B_MIN_*<same scene id>*.nc`.
+  * Its `group_{1,2}_band_depth` and `group_{1,2}_mineral_id` layers are orthorectified through the GLT and nearest-resampled onto our grid.
+  * Mineral IDs are mapped using EMIT's grouping matrix: the EMIT-10 columns for Goethite, Gypsum and Montmorillonite, and library filenames for Jarosite and Ferrihydrite.
+  * The spatial R² (squared Pearson r) is computed over observable pixels. R² is reported as `null` when it is undefined (for example, a mineral that is absent everywhere). Quartz-Feldspar and Water-Shade have no L2B counterpart.
+
+### Verification
+
+```
+$ cd backend && pytest
+87 passed, 3 skipped
+```
+
+`test_unmixing.py` (28 passed) covers:
+
+* **Band mapping:** the 285-band grid; vapour windows excluded exactly; 245 active channels; nearest-band matching and its 15 nm guard.
+* **Library and M:** library provenance; splib07 priority; missing-endmember error; M aligned to the active channels.
+* **Unmixing accuracy:**
+  * Each **pure reference spectrum unmixes to ≥ 95 %** of its own endmember. In practice it is 1.000, with RMSE below 1e-6.
+  * Noise-free mixtures are recovered exactly.
+  * 200 noisy mixtures (σ = 0.002) have RMSE < 0.02, `f ≥ 0`, `Σf ≤ 1`, and mineral fraction error < 0.03.
+  * The sum constraint holds for over-bright pixels.
+  * Edge cases: all-NaN, all-zero, partial-NaN and too-few-channel pixels.
+* **Cube processing:** abundance maps recovered on the input grid and CRS; vegetated and no-data masking with zero confidence; SAI matches the formula; integer-scaled input rescaled; poor-fit flag; fallback to the bundled wavelength grid.
+* **Outputs and validation:**
+  * Zarr and RMSE-log contents.
+  * The L2BMIN comparison against a synthetic L2B granule: goethite and jarosite R² > 0.95, gypsum R² `null`.
+  * The L2B granule finder.
+  * The `unmix` CLI.
+  * The full `ingest` → `unmix` chain: an EMIT NetCDF goes through GLT orthorectification, UTM reprojection and Zarr output, then unmixing.
+
+### Deviations and known gaps
+
+* **245 active channels, not 242.** On EMIT's real wavelength grid, the specified windows (1340–1460 nm and 1790–1970 nm) remove 40 of the 285 channels. This holds for every EMIT calibration from 2022 to 2026. EMIT's own `good_wavelengths` mask (1325–1435 nm, 1770–1962 nm) keeps 244. The code follows the specified windows, so **M is 245 × 7**, and nothing hard-codes 242.
+  * Dropping the three channels below 400 nm as well would give exactly 242. That is a one-line change to `WATER_VAPOR_WINDOWS_NM` or the active mask, if that is what was intended.
+* **USGS splib06a, not splib07.** The USGS servers that host splib07 are blocked from the build environment. The bundled extract is the public-domain splib06a release, taken from EMIT's Tetracorder repository and labelled as splib06a.
+  * A `usgs_splib07_extract.csv` with the same columns overrides it automatically.
+  * Quartz-Feldspar is a derived 50/50 quartz/orthoclase mix, because the library has no single quartz–feldspar spectrum.
+* **Jarosite and EMIT-10.** Jarosite is not one of the EMIT-10 classes. It is validated through the L2B per-pixel mineral IDs, which do include Tetracorder's jarosite entries.
+* **Band depth versus abundance.** L2B band depths are not abundances. The R² therefore measures spatial agreement only, not calibrated fractions.
+* **Not run on real EMIT data.** Earthdata is blocked in this sandbox, so neither Sierrita EMIT granules nor EMITL2BMIN files could be fetched. No `Sierrita_spectral.zarr` or R² figures exist yet. Every result above is from synthetic cubes built from the real library spectra on the real EMIT grid.
+  * `ingest` does not yet download EMITL2BMIN. Download the matching granule (same scene id) into `DATA_DIR/raw/EMITL2BMIN/`, or pass it with `--l2bmin`.
+* **No masks for cloud, cirrus or other conditions.** EMIT L2A `mask` files are not applied yet. Only vegetation (NDVI), no-data and poor-fit pixels are masked.
+
