@@ -2,7 +2,9 @@
  * Typed client for the LithoCreep FastAPI backend (backend/app/api/schemas.py).
  *
  * The browser calls same-origin `/api/*`; next.config.js proxies it to the backend.
+ * Failures other than 404 are also recorded in the issues log (utils/issues.ts).
  */
+import { reportIssue } from './issues';
 
 export type HazardLevel = 'NONE' | 'WATCH_TIER1' | 'ALERT_TIER2' | 'CRITICAL_TIER3';
 
@@ -230,6 +232,135 @@ export interface PixelResponse {
   unavailable: Record<string, string>;
 }
 
+// --------------------------------------------------------------------------- //
+// Phase 10: scenarios and audit
+// --------------------------------------------------------------------------- //
+
+export interface BacktestOutcome {
+  issued: string;
+  lead_days: number;
+  estimate: string | null;
+  lower: string | null;
+  upper: string | null;
+  error_days: number | null;
+  collapse_within_95: boolean | null;
+  status: string | null;
+}
+
+export interface BacktestResponse {
+  facility_id: 'brumadinho';
+  collapse_date: string;
+  historical: boolean;
+  dataset_label: string;
+  source: DataSource;
+  citation: string;
+  points: { point_id: string; zone: string | null; longitude: number | null; latitude: number | null; temporal_coherence: number | null }[];
+  point_id: string;
+  window_days: number;
+  window_start: string;
+  cutoff_days: number;
+  series: KinematicSeries;
+  outcome: BacktestOutcome;
+  sweep: BacktestOutcome[];
+  disclaimer: string;
+}
+
+export interface StressCell {
+  sai: number | null;
+  regime: number | null;
+  regime_meaning: string | null;
+  alert_tier: number | null;
+  kinematic_status: string | null;
+  velocity_mm_yr: number | null;
+  failure_time_estimate: string | null;
+}
+
+export interface StressTestResponse {
+  facility_id: string;
+  simulated: true;
+  label: string;
+  lat: number;
+  lon: number;
+  parameters: {
+    intensity: number;
+    delta_sai_max: number;
+    footprint_radius_m: number;
+    creep_onset: string;
+    creep_lead_days: number;
+    creep_A_yr_mm: number;
+    d_crest_target_m: number;
+  };
+  baseline: StressCell;
+  scenario: StressCell;
+  times: string[];
+  baseline_displacement_mm: (number | null)[];
+  scenario_displacement_mm: (number | null)[];
+  scenario_series: KinematicSeries;
+  setback: { dates: string[]; baseline_d_crest_m: (number | null)[]; scenario_d_crest_m: (number | null)[]; scenario_alerts: string[][] };
+  baseline_hazard_level: string;
+  scenario_hazard_level: string;
+  baseline_regime_counts: Record<string, number>;
+  scenario_regime_counts: Record<string, number>;
+  footprint: [number, number][];
+  regime_matrix: Matrix;
+}
+
+export interface AuditStatus {
+  llm_available: boolean;
+  model: string;
+  effort: string;
+  auto_mode_uses: 'llm' | 'deterministic';
+  modes: string[];
+  standard: string;
+}
+
+export interface BriefFact {
+  label: string;
+  tool: string;
+  path: string;
+  value: string;
+  unit: string;
+}
+
+export interface BriefSection {
+  summary: string;
+  facts: BriefFact[];
+}
+
+export interface AuditBrief {
+  facility: string;
+  facility_id: string;
+  risk_classification: string;
+  hazard_level: string;
+  executive_summary: string;
+  spectral_evidence: BriefSection;
+  kinematic_evidence: BriefSection & {
+    prediction_windows: { label: string; tool: string; path: string; estimate: string; lower_95: string; upper_95: string }[];
+  };
+  hydrological_evidence: BriefSection;
+  compliance_issues: { gistm_principle: string; issue: string; evidence_paths: string[] }[];
+  recommendations: string[];
+  data_limitations: string[];
+  disclaimer: string;
+}
+
+export interface AuditResponse {
+  facility_id: string;
+  generated_by: string;
+  brief: AuditBrief;
+  validation: { passed: boolean; facts_checked?: number; prose_numbers_checked?: number; prediction_windows_checked?: number; tools_used?: string[] };
+  tool_calls: { tool: string; input: Record<string, unknown>; ok: boolean; error: string | null }[];
+  turns: number;
+  usage: Record<string, number>;
+}
+
+export interface Health {
+  status: 'ok';
+  database: string;
+  facilities: number;
+  alerts: number;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public detail: string, public path: string, public body?: unknown) {
     super(`${status} ${path}: ${detail}`);
@@ -239,13 +370,15 @@ export class ApiError extends Error {
 
 const BASE = (process.env.NEXT_PUBLIC_API_BASE || '').replace(/\/$/, '');
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, { signal, headers: { Accept: 'application/json' } });
+    res = await fetch(`${BASE}${path}`, { ...init, headers: { Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}) } });
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err;
-    throw new ApiError(0, `backend unreachable (${(err as Error).message})`, path);
+    const e = new ApiError(0, `backend unreachable (${(err as Error).message})`, path);
+    reportIssue({ source: 'api', message: e.message, detail: path });
+    throw e;
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -257,10 +390,15 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, detail, path, parsed);
+    const e = new ApiError(res.status, detail, path, parsed);
+    // 404s are expected answers ("no product here"); everything else is an outage worth reporting.
+    if (res.status !== 404) reportIssue({ source: 'api', message: `${res.status} ${detail}`, detail: path });
+    throw e;
   }
   return (await res.json()) as T;
 }
+
+const getJson = <T,>(path: string, signal?: AbortSignal) => request<T>(path, { signal });
 
 const enc = encodeURIComponent;
 
@@ -270,6 +408,20 @@ export const api = {
   layers: (id: string, signal?: AbortSignal) => getJson<LayerInfo[]>(`/api/facilities/${enc(id)}/layers`, signal),
   matrix: (id: string, layer: string, t?: string | null, signal?: AbortSignal) =>
     getJson<Matrix>(`/api/facilities/${enc(id)}/matrices?layer=${enc(layer)}${t ? `&t=${enc(t)}` : ''}`, signal),
+  health: (signal?: AbortSignal) => getJson<Health>('/api/health', signal),
+  backtest: (opts: { point?: string | null; cutoffDays?: number; windowDays?: number }, signal?: AbortSignal) => {
+    const q = new URLSearchParams();
+    if (opts.point) q.set('point', opts.point);
+    if (opts.cutoffDays) q.set('cutoff_days', String(opts.cutoffDays));
+    if (opts.windowDays) q.set('window_days', String(opts.windowDays));
+    const qs = q.toString();
+    return getJson<BacktestResponse>(`/api/backtest/brumadinho${qs ? `?${qs}` : ''}`, signal);
+  },
+  stressTest: (id: string, lat: number, lon: number, intensity: number, signal?: AbortSignal) =>
+    getJson<StressTestResponse>(`/api/facilities/${enc(id)}/stress-test?lat=${lat}&lon=${lon}&intensity=${intensity}`, signal),
+  auditStatus: (signal?: AbortSignal) => getJson<AuditStatus>('/api/audit/status', signal),
+  audit: (id: string, body: { mode: string; query?: string | null }, signal?: AbortSignal) =>
+    request<AuditResponse>(`/api/facilities/${enc(id)}/audit`, { method: 'POST', body: JSON.stringify(body), signal }),
   dashboard: (id: string, signal?: AbortSignal) => getJson<DashboardSummary>(`/api/facilities/${enc(id)}/dashboard`, signal),
   pixel: (id: string, lat: number, lon: number, signal?: AbortSignal) =>
     getJson<PixelResponse>(`/api/facilities/${enc(id)}/pixel?lat=${lat}&lon=${lon}`, signal),

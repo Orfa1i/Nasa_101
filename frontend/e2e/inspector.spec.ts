@@ -13,6 +13,7 @@ async function openFacility(page: Page, id: string) {
   await page.goto('/');
   await page.getByTestId('toggle-terrain').uncheck();
   await page.getByTestId('facility-select').selectOption(id);
+  await page.getByTestId('sidebar-tab-inspector').click();
   await expect(page.getByTestId('coordinate-picker')).toBeVisible();
 }
 

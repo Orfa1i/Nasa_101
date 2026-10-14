@@ -13,7 +13,9 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 7 | Audit copilot | **Done**: tests pass, including the Claude tool-use loop against a scripted client. No live Claude call has been made (no API credentials in this sandbox), and every brief so far was built from synthetic test products |
 | 8 | Next.js / deck.gl map | **Done**: unit, component and browser tests pass against the real backend (serving the synthetic demo site), with real WebGL rendering in headless Chromium. No Mapbox token was available, so only the open MapLibre / Terrarium path has run, and with locally served stand-in tiles |
 | 9 | Inspector panels | **Done**: unit, component and browser tests pass, including charts checked against the real API's pixel responses for the synthetic demo site. No real EMIT spectrum or DISP-S1 series has been plotted yet |
-| 10 | Scenarios, backtest UI, CI | Not started |
+| 10 | Scenarios, backtest UI, CI | **Done**: backend, unit, component and browser tests pass; secrets scan and bundle checks pass; CI workflow added. The backtest has only run on a labelled synthetic stand-in (the published Brumadinho series is not bundled) |
+
+**Roadmap: 10 of 10 phases implemented (100 %).** Every phase's code, tests and documentation are in place, and all suites pass (see *Roadmap completion* at the end). What remains is validation against inputs this sandbox could not reach. None of it is code work, and each item is listed under *Outstanding real-data validation*.
 
 ---
 
@@ -867,7 +869,7 @@ $ cd backend && pytest
 * **Synthetic demo data only.** The demo covers a ~1 km synthetic site, so it occupies a small part of the Sierrita bbox. Real layers still wait on real EMIT, DISP-S1 and DSWx inputs (Phases 2–6).
 * **Large JSON matrices.** Each overlay is a JSON matrix (~0.5 MB for Sierrita) rendered client-side. That is fine at facility scale; binary tiles would scale better.
 * **Main-thread terrain decoding.** Terrain tiles are decoded on the main thread to avoid the CDN worker. This costs some frame time while tiles load.
-* **Phase 10 not started.** The audit UI and scenarios come in Phase 10. (Phase 9 replaced the sidebar's text-only cell panel with the Double Inspector.)
+* **Phase 10 done since.** The audit UI and scenarios were added in Phase 10. (Phase 9 replaced the sidebar's text-only cell panel with the Double Inspector.)
 
 ---
 
@@ -975,3 +977,153 @@ $ cd backend && pytest
 * **Product size.** Storing the cube adds 285 bands per pixel to the spectral product (about 25 MB uncompressed for a 150 × 150 crop).
 * **Historic series.** Brumadinho's point series get a Fukuzono fit only once analysed by Phase 3, and the historical CSV has still not been supplied.
 * **GISTM checks need review.** They are setback-only screening rules with paraphrased principles; a qualified reviewer must interpret them.
+
+---
+
+## Phase 10: Scenarios, backtest UI, Compliance Copilot, fallbacks and CI
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `frontend/src/components/ScenarioCtrl.tsx` | Scenario panel: Brumadinho historical backtest and the geotechnical stress-test simulator. |
+| `frontend/src/components/AuditAgent.tsx` | Compliance Copilot: run controls, run status, the GISTM-aligned report, and one-click **Export PDF / Print** and **Download JSON**. |
+| `frontend/src/components/Sidebar.tsx` | Tabs (Layers · Inspector · Scenarios · Audit) and the issues indicator. Chart panels are lazy-loaded and stay mounted once opened. |
+| `frontend/src/components/{ErrorBoundary,ChartKit}.tsx`, `hooks/useApiHealth.ts`, `utils/{issues,scenarios}.ts` | Crash containment, shared chart parts, API health polling, the issues log, and the Arizona rule. |
+| `frontend/src/components/{Basemap,MapViewer}.tsx`, `utils/mapLayers.ts` | Mapbox→MapLibre fallback, terrain provider chain, and the stress-test overlay (regimes plus footprint). |
+| `backend/app/api/scenarios.py`, `fits.py`, `schemas.py`, `endpoints.py` | `GET /api/backtest/brumadinho`, `GET /api/facilities/{id}/stress-test` and `GET /api/audit/status`. The shared Fukuzono-fit helper moved to `fits.py`. |
+| `backend/scripts/build_demo_cache.py` | `--with-synthetic-brumadinho` writes a **labelled** synthetic stand-in CSV into a demo `DATA_DIR`. |
+| `backend/tests/test_scenarios.py`, `test_repository_hygiene.py` | Scenario routes; secrets scan and data-boundary tests. |
+| `frontend/src/__tests__/{phase10,basemap,health}.test.tsx`, `frontend/e2e/phase10.spec.ts`, `frontend/scripts/check-bundle.mjs` | Unit, component and browser tests, and the post-build bundle check. |
+| `scripts/{setup,run_demo,verify}.sh`, `.github/workflows/ci.yml`, `README.md` | Local setup and launch routine, a single verification entry point, and CI. |
+
+### Brumadinho historical backtest
+
+* **Data source.** Pre-unwrapped OPERA DISP-S1 does not cover South America. `GET /api/backtest/brumadinho` reads the published pre-collapse InSAR point series from `DATA_DIR/brumadinho_historic.csv` and drops epochs on or after the collapse (2019-01-25).
+* **Analysis.** It runs the **real Phase 3 analysis** (GP and Fukuzono inverse-velocity regression) on the toe point. The toe is chosen by a `zone` column, or by `toe` in the point id.
+  * **Cut-off.** `cutoff_days` re-issues the forecast N days earlier.
+  * **Sweep.** The forecast is also re-issued at every epoch of the 40-day window.
+  * **Outcome.** Each issue gives the estimate, its 95 % window, the error against the actual collapse, and whether the collapse fell inside the window.
+* **UI.**
+  * A **prominent badge**: violet "HISTORICAL DATASET · 2019" only when the CSV cites a non-synthetic source; amber "SYNTHETIC STAND-IN · NOT THE PUBLISHED SERIES" otherwise.
+  * The citation line.
+  * A 40-day pre-collapse Λ(t) chart: observations, the fit with its 95 % prediction band, the estimated window and the collapse line.
+  * Displacement with its GP band, outcome tiles, the re-issue table and the Phase 3 disclaimer.
+  * Without the CSV the panel explains what to supply (404 with expected columns) and shows **nothing invented**.
+* **Not bundled.** The published series is still not in the repository. Grebby et al. (2021, doi:10.1038/s43247-020-00079-2) publish figures and methods, but no downloadable series was found, and nature.com was unreachable from this sandbox.
+  * The demo and browser tests use a stand-in written by `build_demo_cache.py --with-synthetic-brumadinho`. Its `source` column says "SYNTHETIC stand-in … NOT the published Brumadinho series", so the UI shows the amber badge.
+  * On that idealised stand-in the forecast issued 8 days before the collapse lands 1.6 days late, with the collapse inside its 95 % window. This says nothing about real-data skill.
+
+### Geotechnical stress-test simulator
+
+* **Scope.** `GET /api/facilities/{id}/stress-test?lat&lon&intensity` works only for **Arizona** facilities (bbox inside Arizona's extent, so Sierrita and Mission); others get 422. It needs the facility's cached products (404 otherwise).
+* **Perturbation.** The intensity `h` ∈ [0, 1] drives three synthetic pore-pressure seepage anomalies, applied to in-memory copies of the products (the cache is never written):
+  * **ΔSAI** up to `0.35·h`, Gaussian-tapered within 90 m of the cell.
+  * **Tertiary creep.** Injected displacement following Λ = 1/v = A(t_f − t), from 180 days before the last epoch, with a lead of 180 → 30 days as `h` goes 0 → 1. The **real Phase 3 GP + Fukuzono analysis** re-runs on the 3 × 3 cells around the pick (~1.2 s).
+  * **D_crest.** Valid epochs are ramped towards 5 m from the crest, and the alerts are re-derived with the Phase 4 alert function.
+* **Classification.** The **real Phase 5 `couple()`** re-runs on the perturbed products. It returns baseline-versus-scenario values for the cell (SAI, kinematic status, regime, tier), the facility hazard, the regime counts, the simulated series and setback, the footprint ring, and the scenario regimes on the facility's map grid.
+* **Labelling.** Responses carry `simulated: true` and a "SIMULATED STRESS TEST" label.
+* **UI.**
+  * A hazard slider (0–100 %, debounced) and the cell picked on the map or in the Inspector.
+  * A dashed amber **warning** that these are synthetic hazard scenarios and **test overlays**, not observations or forecasts.
+  * Baseline-versus-SIMULATED comparison table and charts.
+  * The map overlay: scenario regimes plus a footprint ring and a "TEST OVERLAY · SIMULATED STRESS TEST (n %)" badge, with the provenance watermark switched to SIMULATED. The overlay can be toggled off.
+* **Verified behaviour.**
+  * At `h = 0` the scenario reproduces the baseline exactly (regime counts, cell regime, SAI, displacement, setback).
+  * At `h = 1` a stable mid-slope cell becomes `accelerating-forecast` and **Regime 4**. The last D_crest becomes 5 m with a proximity alert.
+  * SAI rises and setback falls monotonically with `h`.
+
+### Compliance Copilot
+
+* **Status.** `GET /api/audit/status` reports whether the Claude copilot can run (credentials or an injected client), the model, and the usable modes. It names GISTM as co-convened by ICMM, UNEP and PRI.
+* **Run controls.** The panel shows that status, a mode selector (`llm` disabled without credentials), an optional request, and a **Run audit** button.
+* **Run status.** idle → running (elapsed time) → done (duration, generator, tool calls, validation) or failed (HTTP status, message, and the validator's discrepancy list on 502).
+* **Report.** Risk classification badge; executive summary; spectral, kinematic and hydrological evidence (each fact with its source tool); the 95 % trend-change windows; compliance issues by GISTM principle with evidence paths; recommendations; data limitations; the disclaimer; the tool-call log.
+* **Export.**
+  * **Export PDF / Print** opens the browser print dialog on a light-themed copy of the report. The copy is rendered into a print-only portal, and print CSS hides the whole app, so the PDF holds only the report.
+  * **Download JSON** saves the full response.
+
+### Fallbacks and error reporting
+
+* **API outage.**
+  * `/api/health` is polled every 20 s. While it fails, a red banner shows the time since the outage. On recovery the registry reloads.
+  * Every API failure other than an expected 404 is recorded in an **issues log**, shown as "! n issues" in the sidebar header. The log dismisses on Escape or an outside click.
+* **Registry cache.** The last good registry is cached in `localStorage`, with every access guarded. When `/api/facilities` fails, the cached copy is shown with a "Backend unreachable … cached <time>" notice and a Retry button.
+* **Backend product (cache) outage.**
+  * Unreadable Zarr products already fall back to the next source server-side (Phase 6). A 503 for a layer marks that toggle "error" and logs the issue; the rest of the map keeps working.
+  * Pixel 404s become per-panel explanations.
+* **Mapbox outage.**
+  * If the Mapbox basemap fails (bad token, quota, network), the map switches to MapLibre GL with the open style. The attribution names the provider in use, and the fallback is logged.
+  * Terrain tries Mapbox terrain-RGB, then the open Terrarium tiles, then flat rendering. Each step is logged and shown.
+* **Crashes.** Map, Inspector, Scenarios and Copilot are each wrapped in an error boundary. A crash shows a "stopped working" card with Retry and is logged, while the rest of the dashboard keeps running.
+
+### Verification
+
+```
+$ cd backend && pytest
+229 passed, 5 skipped
+$ cd frontend && npm run typecheck && npm run lint && npm test && npm run build && npm run check:bundle
+67 passed (7 files) · No ESLint warnings or errors · Bundle check passed (first-load 136.2 kB gzip; heavy libraries code-split; no credentials)
+$ E2E_PYTHON=… E2E_DATA_DIR=<demo dir> npm run test:e2e
+24 passed (map 7, responsive 8, inspector 3, phase10 6)
+$ scripts/setup.sh
+fresh backend/.venv (Python 3.11, exact pins) + npm ci: completed; scripts/verify.sh then ran every check above (its first run caught a 1024 px HUD overlap, fixed and re-run green); scripts/run_demo.sh served the app and API
+```
+
+* **Backend scenarios (`test_scenarios.py`, 9 tests).**
+  * **Backtest:** the missing-CSV explanation; the toe analysis on a labelled stand-in (post-collapse epoch dropped, synthetic never labelled historical, sweep inside the window); the cut-off, `zone` column, "historical" label for a cited source, and the 404/422 errors.
+  * **Stress test:** zero intensity equals the baseline; full intensity drives the real pipelines to Regime 4 and leaves the cache files untouched; monotonic in intensity; the Arizona / bbox / intensity / no-product limits; the creep injection obeys 1/v = A(t_f − t).
+  * **Audit status** modes.
+* **Repository hygiene (`test_repository_hygiene.py`, 12 tests).**
+  * **Secrets scan:** every file git would commit is checked for Anthropic, Mapbox, AWS, GitHub and Slack tokens and private keys. Planting a fake key makes it fail.
+  * **Env files:** none committed, and `.env.example`, shell and YAML assignments are placeholders only. Credentials come from the environment only.
+  * **Data boundaries:** no Brumadinho CSV or pipeline output is tracked, `data/` holds only the registry and reference files, the registry makes no hazard or synthetic claims, and the synthetic generators label their output.
+* **Bundle check (`npm run check:bundle`).**
+  * The first-load JavaScript for `/` is 136 kB gzip, within the 200 kB budget. It was 253 kB before the chart panels were lazy-loaded.
+  * deck.gl/luma.gl, MapLibre GL, Mapbox GL and Recharts are all code-split.
+  * No credential-shaped strings appear in `.next/static`.
+* **Vitest (Phase 10: 17 + 2 + 1 tests).**
+  * **Backtest:** historical vs synthetic badge, missing-CSV state, re-issue requests, errors.
+  * **Stress test:** Arizona limit, needs-a-cell, request parameters, slider, comparison values, the labelled overlay published and withdrawn, error.
+  * **Copilot:** status, mode, POST body, report contents, print/PDF portal and JSON export, validator discrepancies, unreachable backend.
+  * **Fallbacks:** cached registry with issues log; storage blocked; crash containment; terrain provider order; Mapbox→MapLibre fallback (mocked map libraries); health outage and recovery (fake timers).
+* **Playwright (`phase10.spec.ts`, 6 tests, real backend).**
+  * **Backtest:** the stand-in is badged synthetic, the 40-day chart and sweep match the API, and the cut-off slider re-issues the forecast.
+  * **Stress test:** a Regime-1 cell picked in the Inspector, slider to 100 %, values equal to the API response, the map shows `stress-regime` and `stress-footprint` with the TEST OVERLAY badge and a simulated watermark, and the toggle removes them. Bingham is refused as non-Arizona.
+  * **Copilot:** the audit runs; the report matches the API; under print media `#__next` is hidden and only the report is printed; the PDF is generated with 1–3 pages.
+  * **Outages:** with `/api/**` refused, the cached registry, outage banner and issues log appear, and Retry recovers. A 503 for one layer marks it "error" while the map keeps working.
+
+---
+
+## Roadmap completion
+
+| Phase | Implemented | Verified |
+|-------|-------------|----------|
+| 1 | Environment, config, CLI, Earthdata download/crop | Offline tests; the opt-in live CMR tests and authenticated downloads have not run (Earthdata blocked here) |
+| 2 | EMIT NNLS unmixing, SAI | Tests on synthetic cubes |
+| 3 | InSAR GP, Fukuzono timelines | Tests on synthetic stacks and point series |
+| 4 | DSWx setback, D-infinity routing | Tests; terrain and routing on **real GLO-30** for Sierrita |
+| 5 | Coupling, 4-regime classifier | Full Phase 2→5 chain on a synthetic site |
+| 6 | DuckDB + FastAPI | Unmocked API tests; real GLO-30 served |
+| 7 | Audit copilot | Tool loop against a scripted SDK client; deterministic mode end to end |
+| 8 | deck.gl map | Real WebGL in headless Chromium against the real backend |
+| 9 | Double Inspector | Charts checked against the API's pixel responses |
+| 10 | Scenarios, Copilot UI, fallbacks, CI | As above; CI workflow committed |
+
+### Data boundaries
+
+* **Synthetic data is always labelled.** Demo and test products are stamped `synthetic_or_mock`. The API reports them as such, and the map watermark switches to SIMULATED for any synthetic source, alert or stress overlay.
+* **Two hard boundaries.** Synthetic files never sit in the repository's real-data paths, and the Brumadinho series is never bundled or reconstructed. `test_repository_hygiene.py` enforces both.
+* **Stress tests are read-only and labelled.** They are Arizona-only, perturb in-memory copies, never write the cache, and every response and overlay carries the SIMULATED label.
+* **Secrets stay in the environment.** Credentials (Earthdata, Mapbox, Anthropic) are read from the environment or untracked `.env` files only. The repository and the built bundle are scanned for credential patterns.
+* **The API is read-only apart from the audit POST.** CORS allows `GET`, `POST` and `OPTIONS` only. Inputs are validated: bbox checks, intensity in [0, 1], and the `cutoff_days` and `window_days` ranges.
+
+### Outstanding real-data validation (inputs this sandbox could not reach)
+
+1. **NASA Earthdata.** Authenticated EMIT L2A, OPERA DISP-S1 and DSWx downloads for Sierrita and Mission, then the full pipeline on them. Earthdata access was blocked here.
+2. **Brumadinho.** The published pre-collapse InSAR series must be supplied as `data/brumadinho_historic.csv` to run the real backtest. The Phase 3 tests showed the timelines run late.
+3. **Crest lines.** Sourced crest-line geometry for each facility, which the real setback needs.
+4. **Mapbox.** A run with a real `MAPBOX_ACCESS_TOKEN`; only the open path and the fallback have been exercised.
+5. **Claude.** A live copilot run with `ANTHROPIC_API_KEY` (`LITHOCREEP_LIVE_LLM=1 pytest tests/test_agent.py -k live`).
+6. **GISTM review.** The principle mapping is paraphrased and needs review by a qualified engineer.
+7. **CI.** A first run of `.github/workflows/ci.yml` on GitHub.

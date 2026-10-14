@@ -2,10 +2,21 @@
  * Dashboard controls: active facility picker, overlay matrix toggles, the OPERA epoch timeline and
  * the Double Inspector (spectroscopy / kinematics / hydrology charts of the picked cell).
  */
-import Inspector from '@/components/Inspector';
+import { useEffect, useRef, useState } from 'react';
+
+import dynamic from 'next/dynamic';
+
+import ErrorBoundary from '@/components/ErrorBoundary';
+
+// The chart panels (Recharts) load on first use, keeping them out of the first-load bundle.
+const panelLoading = () => <p className="text-sm text-slate-400">Loading panel…</p>;
+const Inspector = dynamic(() => import('@/components/Inspector'), { loading: panelLoading });
+const ScenarioCtrl = dynamic(() => import('@/components/ScenarioCtrl'), { loading: panelLoading });
+const AuditAgent = dynamic(() => import('@/components/AuditAgent'), { loading: panelLoading });
 import type { Dashboard } from '@/hooks/useDashboard';
 import { ALERT_COLORS, ALERT_LABELS, alertColorName } from '@/utils/facilities';
 import { OVERLAYS, type OverlayDef } from '@/utils/overlays';
+import { clearIssues, useIssues } from '@/utils/issues';
 import { formatDate } from '@/utils/provenance';
 
 type SidebarProps = { dash: Dashboard; className?: string };
@@ -36,7 +47,7 @@ function Section({ title, children, id }: { title: string; children: React.React
 
 export function FacilityPicker({ dash }: { dash: Dashboard }) {
   const { facilities, latestAlerts, registryState, registryError, selectedId, selectFacility } = dash;
-  if (registryState === 'loading') return <p className="text-sm text-slate-400">Loading facilities…</p>;
+  if (registryState === 'loading' && !facilities.length) return <p className="text-sm text-slate-400">Loading facilities…</p>;
   if (registryState === 'error')
     return (
       <div role="alert" className="rounded border border-red-500/40 bg-red-950/40 p-2 text-sm text-red-200">
@@ -48,6 +59,15 @@ export function FacilityPicker({ dash }: { dash: Dashboard }) {
     );
   return (
     <div className="space-y-2">
+      {registryState === 'stale' && (
+        <div role="alert" data-testid="registry-stale" className="rounded border border-amber-500/50 bg-amber-950/50 p-2 text-[11px] text-amber-100">
+          Backend unreachable ({registryError}): showing the facility registry cached{' '}
+          {dash.registryCachedAt ? new Date(dash.registryCachedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'earlier'}. Layers and cells need the backend.
+          <button type="button" className="ml-2 underline" onClick={() => void dash.reloadRegistry()}>
+            Retry
+          </button>
+        </div>
+      )}
       <label htmlFor="facility-select" className="sr-only">
         Active facility
       </label>
@@ -261,25 +281,138 @@ export function EpochTimeline({ dash }: { dash: Dashboard }) {
   );
 }
 
+type SidebarTab = 'layers' | 'inspector' | 'scenarios' | 'audit';
+const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
+  { id: 'layers', label: 'Layers' },
+  { id: 'inspector', label: 'Inspector' },
+  { id: 'scenarios', label: 'Scenarios' },
+  { id: 'audit', label: 'Audit' },
+];
+
+export function IssuesIndicator() {
+  const issues = useIssues();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [open]);
+  if (!issues.length) return <span data-testid="issues-none" className="text-[11px] text-slate-500">No issues</span>;
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        data-testid="issues-button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="rounded border border-amber-500/60 bg-amber-950/60 px-2 py-0.5 text-[11px] text-amber-100"
+      >
+        ! {issues.length} issue{issues.length > 1 ? 's' : ''}
+      </button>
+      {open && (
+        <div data-testid="issues-list" className="absolute right-0 z-20 mt-1 max-h-72 w-72 overflow-y-auto rounded-md border border-slate-700 bg-slate-950 p-2 text-[11px] shadow-xl">
+          <ul className="space-y-1.5">
+            {issues.map((i) => (
+              <li key={i.id} data-source={i.source}>
+                <span className="font-mono text-slate-500">{new Date(i.at).toISOString().slice(11, 19)}</span>{' '}
+                <span className="uppercase text-amber-300">{i.source}</span> {i.message}
+                {i.count > 1 && <span className="text-slate-500"> ×{i.count}</span>}
+                {i.fallback && <span className="block text-emerald-300">fallback: {i.fallback}</span>}
+                {i.detail && <span className="block truncate text-slate-500">{i.detail}</span>}
+              </li>
+            ))}
+          </ul>
+          <button type="button" className="mt-2 text-slate-400 underline" onClick={() => { clearIssues(); setOpen(false); }}>
+            Clear
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Sidebar({ dash, className = '' }: SidebarProps) {
+  const [tab, setTab] = useState<SidebarTab>('layers');
+  // Panels stay mounted once opened, so scenario and audit results survive switching tabs.
+  const [visited, setVisited] = useState<Set<SidebarTab>>(() => new Set(['layers']));
+  useEffect(() => setVisited((v) => (v.has(tab) ? v : new Set(v).add(tab))), [tab]);
+  const show = (id: SidebarTab) => (tab === id ? '' : 'hidden');
+  // A map click picks a cell: show it in the Inspector (unless a scenario or audit panel is open).
+  const pickKey = dash.pick ? `${dash.pick.lat},${dash.pick.lon}` : null;
+  useEffect(() => {
+    if (pickKey) setTab((t) => (t === 'layers' ? 'inspector' : t));
+  }, [pickKey]);
   return (
     <aside data-testid="sidebar" aria-label="Dashboard controls" className={`flex flex-col bg-slate-950 text-slate-100 ${className}`}>
-      <header className="border-b border-slate-800 px-4 py-3">
-        <h1 className="text-base font-semibold tracking-tight">LithoCreep</h1>
-        <p className="text-xs text-slate-400">Tailings screening from NASA / OPERA satellite products</p>
+      <header className="flex items-start justify-between gap-2 border-b border-slate-800 px-4 py-3">
+        <div>
+          <h1 className="text-base font-semibold tracking-tight">LithoCreep</h1>
+          <p className="text-xs text-slate-400">Tailings screening from NASA / OPERA satellite products</p>
+        </div>
+        <IssuesIndicator />
       </header>
       <Section title="Active facility" id="sec-facility">
         <FacilityPicker dash={dash} />
       </Section>
-      <Section title="Overlay matrices" id="sec-layers">
-        <LayerToggles dash={dash} />
-      </Section>
-      <Section title="OPERA timeline" id="sec-timeline">
-        <EpochTimeline dash={dash} />
-      </Section>
-      <Section title="Double Inspector" id="sec-inspector">
-        <Inspector dash={dash} />
-      </Section>
+      <div role="tablist" aria-label="Dashboard panels" className="sticky top-0 z-10 grid grid-cols-4 border-b border-slate-800 bg-slate-950">
+        {SIDEBAR_TABS.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            data-testid={`sidebar-tab-${t.id}`}
+            onClick={() => setTab(t.id)}
+            className={`border-b-2 px-1 py-2 text-xs ${tab === t.id ? 'border-sky-400 text-slate-100' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div role="tabpanel" aria-label={SIDEBAR_TABS.find((t) => t.id === tab)?.label}>
+        <div className={show('layers')}>
+          <Section title="Overlay matrices" id="sec-layers">
+            <LayerToggles dash={dash} />
+          </Section>
+          <Section title="OPERA timeline" id="sec-timeline">
+            <EpochTimeline dash={dash} />
+          </Section>
+        </div>
+        {visited.has('inspector') && (
+          <div className={show('inspector')}>
+            <Section title="Double Inspector" id="sec-inspector">
+              <ErrorBoundary name="Inspector">
+                <Inspector dash={dash} />
+              </ErrorBoundary>
+            </Section>
+          </div>
+        )}
+        {visited.has('scenarios') && (
+          <div className={show('scenarios')}>
+            <Section title="Scenarios" id="sec-scenarios">
+              <ErrorBoundary name="Scenarios">
+                <ScenarioCtrl dash={dash} />
+              </ErrorBoundary>
+            </Section>
+          </div>
+        )}
+        {visited.has('audit') && (
+          <div className={show('audit')}>
+            <Section title="Compliance Copilot" id="sec-audit">
+              <ErrorBoundary name="Compliance Copilot">
+                <AuditAgent dash={dash} />
+              </ErrorBoundary>
+            </Section>
+          </div>
+        )}
+      </div>
     </aside>
   );
 }

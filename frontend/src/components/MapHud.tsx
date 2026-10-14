@@ -47,7 +47,7 @@ export function Watermark({ prov, epoch }: { prov: Provenance; epoch: string | n
         role="status"
         data-testid="watermark"
         data-provenance={prov.state}
-        className={`pointer-events-auto w-full min-w-0 rounded-md border px-3 py-2 shadow-lg backdrop-blur md:w-auto md:max-w-md ${BADGE[prov.state]}`}
+        className={`pointer-events-auto w-full min-w-0 max-w-full rounded-md border px-3 py-2 shadow-lg backdrop-blur md:w-auto ${BADGE[prov.state]}`}
       >
         <p className="text-xs font-bold tracking-widest" data-testid="watermark-headline">
           {prov.headline}

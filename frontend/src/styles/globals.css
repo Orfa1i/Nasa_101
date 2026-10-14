@@ -11,3 +11,18 @@ body,
 body {
   @apply bg-slate-950 text-slate-100 antialiased;
 }
+
+/* Print / PDF export: only the audit report portal (#audit-print-root) is printed. */
+@media print {
+  html,
+  body {
+    height: auto;
+    background: #fff;
+  }
+  #__next {
+    display: none !important;
+  }
+  @page {
+    margin: 12mm;
+  }
+}

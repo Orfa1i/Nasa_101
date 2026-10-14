@@ -294,3 +294,96 @@ class AuditResponse(BaseModel):
     turns: int
     usage: dict[str, int]
 
+
+
+# --------------------------------------------------------------------------- #
+# Phase 10: scenarios
+# --------------------------------------------------------------------------- #
+
+
+class BacktestPoint(BaseModel):
+    point_id: str
+    zone: Optional[str] = None
+    longitude: Optional[float] = None
+    latitude: Optional[float] = None
+    temporal_coherence: Optional[float] = None
+
+
+class BacktestOutcome(BaseModel):
+    """How the inverse-velocity estimate issued at ``issued`` compares with the actual collapse."""
+
+    issued: datetime = Field(description="last epoch used (the forecast issue date)")
+    lead_days: float = Field(description="collapse minus issue date")
+    estimate: Optional[datetime] = None
+    lower: Optional[datetime] = None
+    upper: Optional[datetime] = None
+    error_days: Optional[float] = Field(None, description="estimate minus collapse; positive = late")
+    collapse_within_95: Optional[bool] = None
+    status: Optional[str] = None
+
+
+class BacktestResponse(BaseModel):
+    facility_id: Literal["brumadinho"] = "brumadinho"
+    collapse_date: datetime
+    historical: bool = Field(description="True only when the CSV cites a published (non-synthetic) source")
+    dataset_label: str
+    source: DataSource
+    citation: str
+    points: list[BacktestPoint]
+    point_id: str
+    window_days: int
+    window_start: datetime
+    cutoff_days: int
+    series: KinematicSeries
+    outcome: BacktestOutcome
+    sweep: list[BacktestOutcome] = Field(default_factory=list, description="estimates issued at successive epochs before the collapse")
+    disclaimer: str
+
+
+class StressParameters(BaseModel):
+    intensity: float = Field(ge=0, le=1)
+    delta_sai_max: float
+    footprint_radius_m: float
+    creep_onset: datetime
+    creep_lead_days: float
+    creep_A_yr_mm: float
+    d_crest_target_m: float
+
+
+class StressCell(BaseModel):
+    sai: Optional[float] = None
+    regime: Optional[int] = None
+    regime_meaning: Optional[str] = None
+    alert_tier: Optional[int] = None
+    kinematic_status: Optional[str] = None
+    velocity_mm_yr: Optional[float] = None
+    failure_time_estimate: Optional[datetime] = None
+
+
+class StressSetback(BaseModel):
+    dates: list[datetime]
+    baseline_d_crest_m: list[Optional[float]]
+    scenario_d_crest_m: list[Optional[float]]
+    scenario_alerts: list[list[str]]
+
+
+class StressTestResponse(BaseModel):
+    facility_id: str
+    simulated: Literal[True] = True
+    label: str = "SIMULATED STRESS TEST: synthetic perturbation of the cached products, not an observation"
+    lat: float
+    lon: float
+    parameters: StressParameters
+    baseline: StressCell
+    scenario: StressCell
+    times: list[datetime]
+    baseline_displacement_mm: list[Optional[float]]
+    scenario_displacement_mm: list[Optional[float]]
+    scenario_series: KinematicSeries
+    setback: StressSetback
+    baseline_hazard_level: str
+    scenario_hazard_level: str
+    baseline_regime_counts: dict[str, int]
+    scenario_regime_counts: dict[str, int]
+    footprint: list[list[float]] = Field(description="lon/lat ring of the perturbed footprint")
+    regime_matrix: Matrix = Field(description="scenario regimes on the facility's EPSG:4326 grid (test overlay)")

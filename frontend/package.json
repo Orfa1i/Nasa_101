@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "check:bundle": "node scripts/check-bundle.mjs"
   },
   "engines": {
     "node": ">=18.18"

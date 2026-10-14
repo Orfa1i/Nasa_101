@@ -6,10 +6,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, ApiError, type Alert, type DashboardSummary, type Facility, type LayerInfo, type Matrix, type PixelResponse } from '@/utils/api';
+import { reportIssue } from '@/utils/issues';
 import { OVERLAY_BY_ID, type OverlayId } from '@/utils/overlays';
 import { operaEpochs, type Epoch } from '@/utils/provenance';
 
-export type LoadState = 'idle' | 'loading' | 'ready' | 'error';
+/** `stale`: the backend is unreachable and a cached copy (localStorage) is shown. */
+export type LoadState = 'idle' | 'loading' | 'ready' | 'stale' | 'error';
 
 export interface MatrixSlot {
   state: LoadState;
@@ -37,6 +39,40 @@ function isAbort(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
 }
 
+export interface StressOverlay {
+  matrix: Matrix;
+  footprint: [number, number][];
+  intensity: number;
+}
+
+const REGISTRY_CACHE_KEY = 'lithocreep.registry.v1';
+
+interface RegistryCache {
+  at: number;
+  facilities: Facility[];
+  latestAlerts: Record<string, Alert | null>;
+}
+
+/** localStorage can be missing, full or blocked (private windows): every access is guarded. */
+export function saveRegistryCache(c: RegistryCache): void {
+  try {
+    window.localStorage.setItem(REGISTRY_CACHE_KEY, JSON.stringify(c));
+  } catch {
+    /* storage unavailable: the cache is a convenience only */
+  }
+}
+
+export function loadRegistryCache(): RegistryCache | null {
+  try {
+    const raw = window.localStorage.getItem(REGISTRY_CACHE_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw) as RegistryCache;
+    return Array.isArray(c.facilities) && c.facilities.length ? c : null;
+  } catch {
+    return null;
+  }
+}
+
 function emptyPixel(facilityId: string, lat: number, lon: number, unavailable: Record<string, string>): PixelResponse {
   return { facility_id: facilityId, lat, lon, utm_x: NaN, utm_y: NaN, utm_crs: '', kinematics: null, spectral: null, hydrology: null, classification: null, unavailable };
 }
@@ -46,6 +82,8 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
   const [latestAlerts, setLatestAlerts] = useState<Record<string, Alert | null>>({});
   const [registryState, setRegistryState] = useState<LoadState>('loading');
   const [registryError, setRegistryError] = useState<string | null>(null);
+  const [registryCachedAt, setRegistryCachedAt] = useState<number | null>(null);
+  const [stressOverlay, setStressOverlay] = useState<StressOverlay | null>(null);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [layerInfo, setLayerInfo] = useState<LayerInfo[]>([]);
@@ -83,12 +121,25 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
           }
         }),
       );
-      setLatestAlerts(Object.fromEntries(entries));
+      const alerts = Object.fromEntries(entries);
+      setLatestAlerts(alerts);
       setRegistryState('ready');
+      setRegistryCachedAt(null);
+      saveRegistryCache({ at: Date.now(), facilities: list, latestAlerts: alerts });
     } catch (err) {
       if (isAbort(err)) return;
       setRegistryError(message(err));
-      setRegistryState('error');
+      const cached = loadRegistryCache();
+      if (cached) {
+        // API outage: keep working from the last good registry, clearly marked as an offline copy.
+        setFacilities(cached.facilities);
+        setLatestAlerts(cached.latestAlerts);
+        setRegistryCachedAt(cached.at);
+        setRegistryState('stale');
+        reportIssue({ source: 'cache', message: 'Facility registry unavailable', detail: message(err), fallback: `cached copy from ${new Date(cached.at).toISOString()}` });
+      } else {
+        setRegistryState('error');
+      }
     }
   }, []);
 
@@ -101,6 +152,7 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
   // ---- per-facility layer listing ------------------------------------------------------------
   useEffect(() => {
     setLayerInfo([]);
+    setStressOverlay(null);
     setMatrices({});
     setMask({ state: 'idle', matrix: null, error: null });
     setPick(null);
@@ -246,6 +298,9 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
     latestAlerts,
     registryState,
     registryError,
+    registryCachedAt,
+    stressOverlay,
+    setStressOverlay,
     reloadRegistry: () => loadRegistry(),
     selected,
     selectedId,

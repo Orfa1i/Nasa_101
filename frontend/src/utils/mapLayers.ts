@@ -5,7 +5,7 @@
 import { COORDINATE_SYSTEM, WebMercatorViewport, type Layer } from '@deck.gl/core';
 import { _TerrainExtension as TerrainExtension } from '@deck.gl/extensions';
 import { TerrainLayer } from '@deck.gl/geo-layers';
-import { BitmapLayer, GeoJsonLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { BitmapLayer, GeoJsonLayer, PathLayer, ScatterplotLayer } from '@deck.gl/layers';
 import { TerrainLoader } from '@loaders.gl/terrain';
 
 import type { Alert, Facility, Matrix } from './api';
@@ -84,6 +84,11 @@ export function terrainSource(mapboxToken: string | undefined | null): TerrainSo
   };
 }
 
+/** Terrain providers in fallback order: Mapbox (with a token), then the open Terrarium tiles. */
+export function terrainSources(mapboxToken: string | undefined | null): TerrainSource[] {
+  return mapboxToken ? [terrainSource(mapboxToken), terrainSource(null)] : [terrainSource(null)];
+}
+
 // --------------------------------------------------------------------------- //
 // Raster images
 // --------------------------------------------------------------------------- //
@@ -111,6 +116,8 @@ export interface LayerState {
   terrainSource: TerrainSource;
   pickedPoint: [number, number] | null;
   onTerrainTile?: (ok: boolean) => void;
+  /** SIMULATED stress-test regimes and footprint (a test overlay, drawn on top). */
+  stressOverlay?: { matrix: Matrix; footprint: [number, number][] } | null;
 }
 
 /** Draw order, bottom to top. */
@@ -252,6 +259,30 @@ export function buildLayers(s: LayerState): Layer[] {
       extensions: drape,
     }),
   );
+
+  if (s.stressOverlay) {
+    const { image } = overlayImage('anomaly_regime', s.stressOverlay.matrix, null);
+    layers.push(
+      new BitmapLayer({
+        id: `stress-regime${sfx}`,
+        bounds: s.stressOverlay.matrix.bounds,
+        image,
+        opacity: 0.9,
+        _imageCoordinateSystem: COORDINATE_SYSTEM.LNGLAT,
+        textureParameters: { minFilter: 'nearest', magFilter: 'nearest' },
+        extensions: drape,
+      }),
+      new PathLayer<[number, number][]>({
+        id: `stress-footprint${sfx}`,
+        data: [s.stressOverlay.footprint],
+        getPath: (d) => d,
+        getColor: [250, 178, 25, 255],
+        getWidth: 3,
+        widthUnits: 'pixels',
+        extensions: drape,
+      }),
+    );
+  }
 
   if (s.pickedPoint) {
     layers.push(

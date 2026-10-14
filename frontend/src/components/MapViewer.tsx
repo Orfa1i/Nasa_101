@@ -21,10 +21,11 @@ import {
   buildLayers,
   cameraForBbox,
   facilityBbox,
-  terrainSource,
+  terrainSources,
   type FacilityProps,
 } from '@/utils/mapLayers';
 import { OVERLAY_BY_ID, valueAt, type OverlayId } from '@/utils/overlays';
+import { reportIssue } from '@/utils/issues';
 import { provenance } from '@/utils/provenance';
 
 type MapViewerProps = { dash: Dashboard; mapboxToken?: string };
@@ -71,27 +72,42 @@ export default function MapViewer({ dash, mapboxToken }: MapViewerProps) {
   const [hover, setHover] = useState<HoverReadout | null>(null);
   const [basemapError, setBasemapError] = useState<string | null>(null);
   const [deckError, setDeckError] = useState<string | null>(null);
-  const terrain = useMemo(() => terrainSource(mapboxToken), [mapboxToken]);
+  const [basemapName, setBasemapName] = useState(basemapProvider(mapboxToken));
+  const sources = useMemo(() => terrainSources(mapboxToken), [mapboxToken]);
+  const [sourceIdx, setSourceIdx] = useState(0);
+  const terrain = sources[Math.min(sourceIdx, sources.length - 1)];
   const sized = size.width > 0 && size.height > 0;
 
-  // Draped layers only render where terrain exists, so if the terrain tiles cannot be loaded
-  // (offline, provider outage, bad token) fall back to flat rendering instead of a blank map.
+  // Draped layers only render where terrain exists. If a provider's tiles cannot be loaded
+  // (offline, Mapbox outage, bad token) try the next provider, then fall back to flat rendering.
   const [terrainStatus, setTerrainStatus] = useState<'loading' | 'ok' | 'failed'>('loading');
   const terrainErrors = useRef(0);
   useEffect(() => {
     if (dash.terrain) {
       terrainErrors.current = 0;
+      setSourceIdx(0);
       setTerrainStatus('loading');
     }
   }, [dash.terrain]);
-  const onTerrainTile = useCallback((ok: boolean) => {
-    if (ok) {
-      setTerrainStatus((st) => (st === 'ok' ? st : 'ok'));
-      return;
-    }
-    terrainErrors.current += 1;
-    if (terrainErrors.current >= 3) setTerrainStatus((st) => (st === 'loading' ? 'failed' : st));
-  }, []);
+  const onTerrainTile = useCallback(
+    (ok: boolean) => {
+      if (ok) {
+        setTerrainStatus((st) => (st === 'ok' ? st : 'ok'));
+        return;
+      }
+      terrainErrors.current += 1;
+      if (terrainErrors.current < 3 || terrainStatus !== 'loading') return;
+      terrainErrors.current = 0;
+      if (sourceIdx < sources.length - 1) {
+        reportIssue({ source: 'terrain', message: `${terrain.provider === 'mapbox' ? 'Mapbox' : 'Open'} terrain tiles unavailable`, fallback: 'open Terrarium terrain tiles' });
+        setSourceIdx((i) => i + 1);
+      } else {
+        reportIssue({ source: 'terrain', message: 'Terrain tiles unavailable', fallback: 'flat overlays (no 3D terrain)' });
+        setTerrainStatus('failed');
+      }
+    },
+    [sourceIdx, sources.length, terrain.provider, terrainStatus],
+  );
   const terrainOn = dash.terrain && terrainStatus !== 'failed';
 
   // Fly to the active facility's bbox (or back to the world view).
@@ -132,14 +148,15 @@ export default function MapViewer({ dash, mapboxToken }: MapViewerProps) {
         terrainSource: terrain,
         pickedPoint: dash.pick ? [dash.pick.lon, dash.pick.lat] : null,
         onTerrainTile,
+        stressOverlay: dash.stressOverlay,
       }),
-    [dash.facilities, dash.latestAlerts, dash.selectedId, dash.activeOverlays, readyMatrices, dash.mask.matrix, dash.showMask, dash.overlayOpacity, terrainOn, terrain, dash.pick, onTerrainTile],
+    [dash.facilities, dash.latestAlerts, dash.selectedId, dash.activeOverlays, readyMatrices, dash.mask.matrix, dash.showMask, dash.overlayOpacity, terrainOn, terrain, dash.pick, onTerrainTile, dash.stressOverlay],
   );
 
-  const shownSources: DataSource[] = useMemo(
-    () => (dash.selectedId ? dash.activeOverlays.map((id) => readyMatrices[id]?.source).filter((s): s is DataSource => !!s) : []),
-    [dash.selectedId, dash.activeOverlays, readyMatrices],
-  );
+  const shownSources: DataSource[] = useMemo(() => {
+    const shown = dash.selectedId ? dash.activeOverlays.map((id) => readyMatrices[id]?.source).filter((s): s is DataSource => !!s) : [];
+    return dash.stressOverlay ? [...shown, dash.stressOverlay.matrix.source] : shown;
+  }, [dash.selectedId, dash.activeOverlays, readyMatrices, dash.stressOverlay]);
   const prov = provenance(shownSources, dash.selectedId ? dash.latestAlerts[dash.selectedId] : null);
   const shownEpoch = dash.activeOverlays.map((id) => readyMatrices[id]?.time).find((t): t is string => !!t) ?? null;
 
@@ -248,13 +265,24 @@ export default function MapViewer({ dash, mapboxToken }: MapViewerProps) {
         onError={(err) => setDeckError(err.message)}
         getCursor={({ isHovering, isDragging }) => (isDragging ? 'grabbing' : isHovering ? 'pointer' : 'crosshair')}
       >
-        <Basemap mapboxToken={mapboxToken} onError={setBasemapError} />
+        <Basemap mapboxToken={mapboxToken} onError={setBasemapError} onProvider={setBasemapName} />
       </DeckGL>
 
       <SimulatedBackdrop prov={prov} />
 
       <div className="pointer-events-none absolute inset-x-2 top-2 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-        <Watermark prov={prov} epoch={shownEpoch} />
+        <div className="flex w-full min-w-0 flex-col items-start gap-2 md:w-auto md:max-w-md">
+          <Watermark prov={prov} epoch={shownEpoch} />
+          {dash.stressOverlay && (
+            <p
+              role="status"
+              data-testid="stress-overlay-badge"
+              className="pointer-events-auto rounded border-2 border-dashed border-amber-400 bg-amber-950/90 px-3 py-1 text-[11px] font-bold tracking-wider text-amber-100"
+            >
+              TEST OVERLAY · SIMULATED STRESS TEST ({Math.round(dash.stressOverlay.intensity * 100)} %)
+            </p>
+          )}
+        </div>
         {dash.selectedId && (
           <QualityPanel rmse={dash.matrices.spectral_rmse} coherence={dash.matrices.coherence} mask={dash.mask.matrix} hover={hover} />
         )}
@@ -285,7 +313,7 @@ export default function MapViewer({ dash, mapboxToken }: MapViewerProps) {
         data-testid="attribution"
         className="absolute bottom-0 right-0 max-w-full truncate rounded-tl bg-slate-950/70 px-2 py-0.5 text-[10px] text-slate-400"
       >
-        {basemapProvider(mapboxToken)} · deck.gl{terrainOn ? ` · ${terrain.attribution}` : ''}
+        {basemapName} · deck.gl{terrainOn ? ` · ${terrain.attribution}` : ''}
       </p>
     </div>
   );

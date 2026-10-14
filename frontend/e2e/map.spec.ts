@@ -159,6 +159,9 @@ test.describe('map viewer', () => {
     await selectFacility(page, 'sierrita');
     await expect.poll(() => mapAttr(page, 'terrain')).toBe('failed');
     await expect(page.getByTestId('terrain-fallback')).toBeVisible();
+    // the fallback is reported in the issues log
+    await page.getByTestId('issues-button').click();
+    await expect(page.getByTestId('issues-list')).toContainText('fallback: flat overlays (no 3D terrain)');
     await waitForLayers(page, 'matrix-anomaly_regime', 'facilities');
     expect(await layerIds(page)).not.toContain('terrain');
   });

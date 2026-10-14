@@ -111,6 +111,8 @@ async function setup(opts: StubOptions = {}) {
   const fetch = stubFetch(opts);
   render(<Harness />);
   await screen.findByTestId('coordinate-picker');
+  // the picker pre-fills the facility centre once selected; type only after that has landed
+  await waitFor(() => expect(screen.getByTestId('input-lat')).not.toHaveValue(''));
   return fetch;
 }
 

@@ -20,3 +20,8 @@ data/cache/*_spectral.zarr/
 # Local metadata database (rebuilt on API start-up)
 data/*.duckdb
 data/*.duckdb.wal
+data/cache/
+# The published Brumadinho series is supplied locally (check its licence before sharing).
+data/brumadinho_historic.csv
+# SYNTHETIC demo DATA_DIR built by scripts/run_demo.sh
+.demo-data/

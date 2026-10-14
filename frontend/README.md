@@ -26,6 +26,7 @@ The browser calls same-origin `/api/*`; `next.config.js` proxies it to `LITHOCRE
 ```bash
 npm run typecheck && npm run lint
 npm test                           # Vitest + Testing Library (jsdom, API fixtures)
+npm run build && npm run check:bundle   # first-load budget, code-splitting, no bundled credentials
 E2E_PYTHON=/path/to/venv/bin/python E2E_DATA_DIR=/tmp/lithocreep-demo npm run test:e2e
 ```
 
@@ -39,7 +40,10 @@ set `PW_CHROMIUM_PATH` to use a pre-installed Chromium.
 |------|---------|
 | `src/components/MapViewer.tsx` | deck.gl map: TerrainLayer, facility GeoJsonLayer, matrix BitmapLayers, camera fly-to, picking |
 | `src/components/MapHud.tsx` | Provenance watermark, data-quality panel (RMSE / coherence), legend |
-| `src/components/Sidebar.tsx` | Facility picker, overlay toggles, OPERA epoch timeline, Double Inspector |
+| `src/components/Sidebar.tsx` | Facility picker and tabs: Layers (toggles, OPERA timeline), Inspector, Scenarios, Audit; issues log |
+| `src/components/ScenarioCtrl.tsx` | Brumadinho historical backtest and the SIMULATED stress-test simulator (Arizona facilities) |
+| `src/components/AuditAgent.tsx` | Compliance Copilot: run audits, status, GISTM-aligned report, Export PDF / Print, JSON |
+| `src/components/ErrorBoundary.tsx`, `src/hooks/useApiHealth.ts`, `src/utils/issues.ts` | Crash containment, backend health polling, issues log (outage fallbacks) |
 | `src/components/Inspector.tsx` | Double Inspector (Recharts): coordinate picker; spectroscopy, kinematics (GP bands, Fukuzono trend) and hydrology (D_crest, GISTM checks) panels |
 | `src/components/Basemap.tsx` | Mapbox GL / MapLibre GL basemap (code-split) |
 | `src/hooks/useDashboard.ts` | Dashboard state and API loading |

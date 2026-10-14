@@ -4,6 +4,9 @@
  * Each library is code-split, so only the one in use is downloaded.
  */
 import dynamic from 'next/dynamic';
+import { useEffect, useState } from 'react';
+
+import { reportIssue } from '@/utils/issues';
 
 const MAPLIBRE_STYLE = process.env.NEXT_PUBLIC_MAP_STYLE || 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const MAPBOX_STYLE = process.env.NEXT_PUBLIC_MAP_STYLE || 'mapbox://styles/mapbox/satellite-streets-v12';
@@ -47,8 +50,33 @@ const MaplibreMap = dynamic(
   { ssr: false },
 );
 
-export default function Basemap({ mapboxToken, onError }: BasemapProps) {
-  return mapboxToken ? <MapboxMap mapboxToken={mapboxToken} onError={onError} /> : <MaplibreMap onError={onError} />;
+/**
+ * Mapbox outage (bad token, quota, network): fall back to MapLibre GL with the open style and
+ * record the fallback in the issues log. A MapLibre failure leaves the overlays without a basemap.
+ */
+export default function Basemap({ mapboxToken, onError, onProvider }: BasemapProps & { onProvider?: (name: 'Mapbox GL' | 'MapLibre GL') => void }) {
+  const [mapboxFailed, setMapboxFailed] = useState(false);
+  const useMapbox = !!mapboxToken && !mapboxFailed;
+  useEffect(() => onProvider?.(useMapbox ? 'Mapbox GL' : 'MapLibre GL'), [useMapbox, onProvider]);
+  if (useMapbox) {
+    return (
+      <MapboxMap
+        mapboxToken={mapboxToken}
+        onError={(message) => {
+          reportIssue({ source: 'basemap', message: `Mapbox basemap failed: ${message}`, fallback: 'MapLibre GL with open basemap tiles' });
+          setMapboxFailed(true);
+        }}
+      />
+    );
+  }
+  return (
+    <MaplibreMap
+      onError={(message) => {
+        reportIssue({ source: 'basemap', message: `Basemap unavailable: ${message}`, fallback: 'overlays drawn without a basemap' });
+        onError?.(message);
+      }}
+    />
+  );
 }
 
 export function basemapProvider(mapboxToken?: string): 'Mapbox GL' | 'MapLibre GL' {

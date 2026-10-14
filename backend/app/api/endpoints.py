@@ -11,6 +11,8 @@
 | ``GET /api/facilities/{id}/pixel?lat=&lon=`` | time series and values at a point (bilinear between cells, nearest for categories) |
 | ``GET /api/facilities/{id}/dashboard`` | the unified dashboard validation query (all inspection tools plus consistency checks) |
 | ``POST /api/facilities/{id}/audit`` | a validated GISTM screening brief, from the Claude copilot or the deterministic template |
+| ``GET /api/audit/status`` | which audit modes are usable (Claude credentials present or not) |
+| ``GET /api/backtest/brumadinho``, ``GET /api/facilities/{id}/stress-test`` | scenarios (``app.api.scenarios``) |
 
 Errors:
 * 404: unknown facility, or a missing product or layer.
@@ -37,6 +39,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import layers as L
+from app.api.fits import fukuzono_fit as _fukuzono_fit
 from app.api.schemas import (
     Alert,
     AuditRequest,
@@ -44,7 +47,6 @@ from app.api.schemas import (
     ClassificationPoint,
     DataSource,
     Facility,
-    FukuzonoFit,
     Health,
     HydrologyPoint,
     KinematicSeries,
@@ -260,6 +262,22 @@ def facility_dashboard(request: Request, facility_id: str, cur: Any = Depends(ge
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/audit/status")
+def audit_status(request: Request, settings: Settings = Depends(get_app_settings)) -> dict[str, Any]:
+    """Which audit modes are usable: the Claude copilot needs credentials (or an injected client)."""
+    from app.agent import copilot
+
+    llm = copilot.credentials_available() or getattr(request.app.state, "llm_client", None) is not None
+    return {
+        "llm_available": llm,
+        "model": settings.LLM_MODEL,
+        "effort": settings.LLM_EFFORT,
+        "auto_mode_uses": "llm" if llm else "deterministic",
+        "modes": ["auto", "llm", "deterministic"] if llm else ["auto", "deterministic"],
+        "standard": "GISTM (Global Industry Standard on Tailings Management, 2020; co-convened by ICMM, UNEP and PRI)",
+    }
+
+
 @router.post("/facilities/{facility_id}/audit", response_model=AuditResponse)
 def facility_audit(
     request: Request,
@@ -355,62 +373,6 @@ def _raster_kinematics(settings: Settings, prefix: str, x: float, y: float) -> K
         instability_time_upper=L.json_time(near("instability_time_upper")),
         disclaimer=ds.attrs.get("disclaimer"),
         fukuzono=_fukuzono_fit(ds.sel(x=loc.xn, y=loc.yn)),
-    )
-
-
-def _fukuzono_fit(cell: xr.Dataset) -> Optional[FukuzonoFit]:
-    """Re-evaluate the Phase 3 inverse-velocity regression of one cell/point with its full covariance.
-
-    The regression inputs are the stored Lambda = 1/|v| over the last ``FUKUZONO_POINTS`` epochs with
-    sigma = (upper - lower) / 4, exactly as in ``kinematics.fukuzono_forecast``; the zero crossing and
-    its 95 % bounds are the stored Phase 3 values.
-    """
-    from app.pipelines import kinematics as kin
-
-    needed = {"inverse_velocity", "inverse_velocity_lower", "inverse_velocity_upper", "fukuzono_slope", "fukuzono_lambda_0"}
-    if not needed <= set(cell.data_vars) or not np.isfinite(float(cell["fukuzono_slope"].values)):
-        return None
-    times = pd.to_datetime(cell["time"].values)
-    n = kin.FUKUZONO_POINTS
-    lam = cell["inverse_velocity"].values[-n:].astype(np.float64)
-    lo = cell["inverse_velocity_lower"].values[-n:].astype(np.float64)
-    hi = cell["inverse_velocity_upper"].values[-n:].astype(np.float64)
-    if lam.size < n or not (np.isfinite(lam).all() and np.isfinite(lo).all() and np.isfinite(hi).all()):
-        return None
-    t0 = times[-1]
-    x = ((times[-n:] - t0).total_seconds() / 86400.0 / kin.DAYS_PER_YEAR).to_numpy()
-    (b0, b1), cov = kin.bayesian_linear_fit(x, lam, (hi - lo) / 4.0)
-    if b1 >= 0:
-        return None
-
-    crossing = L.json_time(cell["instability_time"].values) if "instability_time" in cell else None
-    crossing_lo = L.json_time(cell["instability_time_lower"].values) if "instability_time_lower" in cell else None
-    crossing_hi = L.json_time(cell["instability_time_upper"].values) if "instability_time_upper" in cell else None
-    years = lambda when: (pd.Timestamp(when) - t0).total_seconds() / 86400.0 / kin.DAYS_PER_YEAR  # noqa: E731
-    end = years(crossing_hi) if crossing_hi is not None else -b0 / b1
-    end = min(max(end, 0.0) * 1.15 + 1e-3, 5.0)  # a little past the latest crossing bound, at most 5 years
-    grid = np.linspace(x[0], end, 60)
-    mean = b0 + b1 * grid
-    sd = np.sqrt(np.maximum(cov[0, 0] + 2 * grid * cov[0, 1] + grid**2 * cov[1, 1], 0.0))
-    line_times = [(t0 + pd.Timedelta(days=float(g) * kin.DAYS_PER_YEAR)).floor("s").to_pydatetime() for g in grid]
-    significant = bool(cell["fukuzono_slope_significant"].values) if "fukuzono_slope_significant" in cell else bool(b1 + 2 * np.sqrt(cov[1, 1]) < 0)
-    return FukuzonoFit(
-        window_times=[t.to_pydatetime() for t in times[-n:]],
-        inverse_velocity_yr_mm=L.json_list(lam),
-        inverse_velocity_lower_yr_mm=L.json_list(lo),
-        inverse_velocity_upper_yr_mm=L.json_list(hi),
-        t0=t0.to_pydatetime(),
-        lambda_0_yr_mm=float(b0),
-        slope_yr_mm_per_yr=float(b1),
-        slope_std=float(np.sqrt(cov[1, 1])),
-        slope_significant=significant,
-        line_times=line_times,
-        line_yr_mm=[float(v) for v in mean],
-        line_lower_yr_mm=[float(v) for v in mean - 2 * sd],
-        line_upper_yr_mm=[float(v) for v in mean + 2 * sd],
-        crossing_estimate=crossing,
-        crossing_lower=crossing_lo,
-        crossing_upper=crossing_hi,
     )
 
 
@@ -631,7 +593,7 @@ def create_app(settings: Optional[Settings] = None, *, llm_client: Any = None) -
     ]
     app = FastAPI(
         title="LithoCreep API",
-        version="0.6.0",
+        version="1.0.0",
         description="Satellite screening of tailings facilities. Screening only: not a structural safety certification.",
         lifespan=lifespan,
     )
@@ -641,5 +603,8 @@ def create_app(settings: Optional[Settings] = None, *, llm_client: Any = None) -
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
+    from app.api import scenarios  # imports this module, so it is registered here
+
     app.include_router(router)
+    app.include_router(scenarios.router)
     return app

@@ -6,7 +6,7 @@
  * here; both query GET /api/facilities/{id}/pixel. The hydrology tab reads the facility-level
  * GET /api/facilities/{id}/dashboard summary.
  */
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import {
   Area,
   Bar,
@@ -25,6 +25,7 @@ import {
   YAxis,
 } from 'recharts';
 
+import { AXIS, ChartFrame, Empty, LEGEND, NO_ANIMATION, StatTile, StatusBadge, TOOLTIP, fmtDay, fmtMonth, num } from '@/components/ChartKit';
 import type { Dashboard } from '@/hooks/useDashboard';
 import type { KinematicSeries, PixelResponse, SetbackSummary, Spectrum } from '@/utils/api';
 import {
@@ -51,78 +52,6 @@ import {
 import { formatDate } from '@/utils/provenance';
 
 // --------------------------------------------------------------------------- //
-// Shared chart furniture
-// --------------------------------------------------------------------------- //
-
-const AXIS = { stroke: VIZ.grid, tick: { fill: VIZ.axis, fontSize: 10 }, tickLine: false } as const;
-const TOOLTIP = {
-  contentStyle: { background: '#020617', border: '1px solid #334155', borderRadius: 6, fontSize: 11, color: VIZ.text },
-  labelStyle: { color: VIZ.axis },
-  cursor: { stroke: VIZ.axis, strokeDasharray: '3 3' },
-} as const;
-const LEGEND = { wrapperStyle: { fontSize: 11, color: VIZ.text }, iconSize: 10 } as const;
-const NO_ANIMATION = { isAnimationActive: false } as const;
-
-const fmtMonth = (t: number) => new Date(t).toISOString().slice(0, 7);
-const fmtDay = (t: number) => new Date(t).toISOString().slice(0, 10);
-const num = (v: number | null | undefined, d: number) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(d));
-
-/** Measures its width (charts get explicit pixel sizes; falls back to 320 px before layout). */
-function ChartFrame({ title, testId, height, caption, children }: { title: string; testId: string; height: number; caption?: ReactNode; children: (width: number) => ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(320);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const update = () => el.clientWidth > 0 && setWidth(el.clientWidth);
-    update();
-    if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  return (
-    <figure data-testid={testId} className="rounded-md border border-slate-800 bg-slate-900 p-2">
-      <figcaption className="mb-1 text-xs font-semibold text-slate-200">{title}</figcaption>
-      <div ref={ref} style={{ height }} className="w-full">
-        {children(width)}
-      </div>
-      {caption && <p className="mt-1 text-[11px] leading-snug text-slate-400">{caption}</p>}
-    </figure>
-  );
-}
-
-export function StatusBadge({ level, label, testId }: { level: StatusLevel; label?: string; testId?: string }) {
-  const s = STATUS[level];
-  return (
-    <span data-testid={testId} data-level={level} className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-slate-200">
-      <span aria-hidden className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-[9px] font-bold text-slate-950" style={{ background: s.color }}>
-        {s.icon}
-      </span>
-      {label ?? s.label}
-    </span>
-  );
-}
-
-function Empty({ children, testId }: { children: ReactNode; testId?: string }) {
-  return (
-    <p data-testid={testId} className="rounded-md border border-dashed border-slate-700 px-3 py-4 text-center text-xs text-slate-400">
-      {children}
-    </p>
-  );
-}
-
-function StatTile({ label, value, sub, testId }: { label: string; value: ReactNode; sub?: ReactNode; testId?: string }) {
-  return (
-    <div data-testid={testId} className="rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5">
-      <p className="text-[11px] text-slate-400">{label}</p>
-      <p className="font-mono text-base leading-tight text-slate-100">{value}</p>
-      {sub && <div className="mt-0.5">{sub}</div>}
-    </div>
-  );
-}
-
-// --------------------------------------------------------------------------- //
 // Coordinate picker
 // --------------------------------------------------------------------------- //
 
@@ -141,7 +70,9 @@ export function CoordinatePicker({ dash }: { dash: Dashboard }) {
       setLon(selected.longitude.toFixed(6));
     }
     setError(null);
-  }, [pick, selected]);
+    // Only a new coordinate or facility resets the inputs (not the pick's loading -> ready update).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pick?.lat, pick?.lon, selected?.id]);
 
   if (!selected) return null;
   const submit = (e: FormEvent) => {
@@ -350,6 +281,8 @@ function FukuzonoChart({ k }: { k: KinematicSeries }) {
   const lo = fit.crossing_lower ? ms(fit.crossing_lower) : null;
   const hi = fit.crossing_upper ? ms(fit.crossing_upper) : null;
   const est = fit.crossing_estimate ? ms(fit.crossing_estimate) : null;
+  // Explicit domain: the scatter series carry their own data, so derive the extent from every row.
+  const domain: [number, number] = [rows[0]?.t ?? 0, Math.max(rows.at(-1)?.t ?? 0, hi ?? 0)];
   return (
     <ChartFrame
       title="Inverse velocity Λ(t) = |v_LOS|⁻¹ → 0 (Fukuzono)"
@@ -383,15 +316,15 @@ function FukuzonoChart({ k }: { k: KinematicSeries }) {
           {lo !== null && hi !== null && (
             <ReferenceArea x1={lo} x2={hi} fill={VIZ.series2} fillOpacity={0.12} strokeOpacity={0} label={{ value: '95 %', fill: VIZ.axis, fontSize: 9, position: 'insideTop' }} />
           )}
-          <XAxis dataKey="t" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={fmtMonth} minTickGap={24} {...AXIS} />
+          <XAxis dataKey="t" type="number" scale="time" domain={domain} tickFormatter={fmtMonth} minTickGap={24} {...AXIS} />
           <YAxis width={54} tickFormatter={(v: number) => v.toFixed(3)} {...AXIS} />
           <ReferenceLine y={0} stroke={VIZ.muted} label={{ value: 'Λ = 0', fill: VIZ.axis, fontSize: 9, position: 'insideBottomLeft' }} />
           {est !== null && <ReferenceLine x={est} stroke={VIZ.series2} strokeDasharray="2 2" />}
           <Tooltip {...TOOLTIP} labelFormatter={(v) => fmtDay(Number(v))} formatter={(v: number | [number, number], name) => [Array.isArray(v) ? `${v[0].toFixed(4)} – ${v[1].toFixed(4)} yr/mm` : `${v.toFixed(4)} yr/mm`, name]} />
           <Legend {...LEGEND} />
           <Area name="Prediction band (95 %)" dataKey="fitBand" fill={VIZ.series2} fillOpacity={0.2} stroke="none" connectNulls {...NO_ANIMATION} />
-          <Scatter name="Earlier Λ" dataKey="context" fill="none" stroke={VIZ.series1} shape="circle" legendType="none" {...NO_ANIMATION} />
-          <Scatter name="Fitted Λ" dataKey="lambda" fill={VIZ.series1} shape="circle" legendType="circle" {...NO_ANIMATION} />
+          <Scatter name="Earlier Λ" data={rows.filter((r) => r.context !== null)} dataKey="context" fill="none" stroke={VIZ.series1} shape="circle" legendType="none" {...NO_ANIMATION} />
+          <Scatter name="Fitted Λ" data={rows.filter((r) => r.lambda !== null)} dataKey="lambda" fill={VIZ.series1} shape="circle" legendType="circle" {...NO_ANIMATION} />
           <Line name="Regression" dataKey="fit" stroke={VIZ.series2} strokeWidth={2} strokeDasharray="5 3" dot={false} connectNulls {...NO_ANIMATION} />
         </ComposedChart>
       )}

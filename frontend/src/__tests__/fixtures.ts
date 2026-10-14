@@ -4,7 +4,22 @@
  */
 import { vi } from 'vitest';
 
-import type { Alert, DashboardSummary, DataSource, Facility, FukuzonoFit, KinematicSeries, LayerInfo, Matrix, PixelResponse, Spectrum } from '@/utils/api';
+import type {
+  Alert,
+  AuditResponse,
+  AuditStatus,
+  BacktestResponse,
+  DashboardSummary,
+  DataSource,
+  Facility,
+  FukuzonoFit,
+  KinematicSeries,
+  LayerInfo,
+  Matrix,
+  PixelResponse,
+  Spectrum,
+  StressTestResponse,
+} from '@/utils/api';
 
 export const SIERRITA_BBOX: [number, number, number, number] = [-111.12, 31.83, -111.04, 31.9];
 
@@ -178,6 +193,120 @@ export const DASHBOARD: DashboardSummary = {
   },
 };
 
+// --------------------------------------------------------------------------- //
+// Phase 10 fixtures
+// --------------------------------------------------------------------------- //
+
+export const BRUMADINHO: Facility = {
+  id: 'brumadinho', name: 'Brumadinho Dam I (Corrego do Feijao)', country: 'Brazil', latitude: -20.12, longitude: -44.125,
+  bbox_xmin: -44.15, bbox_ymin: -20.14, bbox_xmax: -44.1, bbox_ymax: -20.1,
+  mine_type: 'iron ore', embankment_type: 'upstream', crest_line_geom: null, status: 'FAILED',
+};
+
+const BT_TIMES = ['2018-12-12T00:00:00', '2018-12-18T00:00:00', '2018-12-24T00:00:00', '2018-12-30T00:00:00', '2019-01-05T00:00:00', '2019-01-11T00:00:00', '2019-01-17T00:00:00'];
+
+export function backtest(over: Partial<BacktestResponse> = {}): BacktestResponse {
+  return {
+    facility_id: 'brumadinho',
+    collapse_date: '2019-01-25T00:00:00',
+    historical: true,
+    dataset_label: 'HISTORICAL DATASET: Example et al. (published series)',
+    source: { product: 'kinematics', file: 'brumadinho_historic.csv', variable: 'displacement', synthetic_or_mock: false, label: 'historical backup; Example et al.' },
+    citation: 'Example et al. (published series)',
+    points: [
+      { point_id: 'toe', zone: 'toe', longitude: -44.121, latitude: -20.119, temporal_coherence: 0.85 },
+      { point_id: 'crest', zone: 'crest', longitude: -44.118, latitude: -20.116, temporal_coherence: 0.85 },
+    ],
+    point_id: 'toe',
+    window_days: 40,
+    window_start: '2018-12-16T00:00:00',
+    cutoff_days: 0,
+    series: {
+      ...KINEMATICS,
+      times: BT_TIMES,
+      inverse_velocity_yr_mm: [0.06, 0.05, 0.04, 0.03, 0.02, 0.012, 0.006],
+      fukuzono: {
+        ...FIT,
+        window_times: BT_TIMES.slice(2),
+        t0: BT_TIMES[6],
+        line_times: ['2018-12-24T00:00:00', '2019-01-17T00:00:00', '2019-01-26T00:00:00'],
+        line_yr_mm: [0.04, 0.006, 0],
+        line_lower_yr_mm: [0.036, 0.003, -0.003],
+        line_upper_yr_mm: [0.044, 0.009, 0.003],
+        crossing_estimate: '2019-01-26T15:00:00',
+        crossing_lower: '2019-01-22T00:00:00',
+        crossing_upper: '2019-01-30T00:00:00',
+      },
+    },
+    outcome: {
+      issued: '2019-01-17T00:00:00', lead_days: 8, estimate: '2019-01-26T15:00:00', lower: '2019-01-22T00:00:00', upper: '2019-01-30T00:00:00',
+      error_days: 1.6, collapse_within_95: true, status: 'accelerating-forecast',
+    },
+    sweep: [
+      { issued: '2019-01-11T00:00:00', lead_days: 14, estimate: '2019-02-02T00:00:00', lower: '2019-01-24T00:00:00', upper: '2019-02-11T00:00:00', error_days: 8, collapse_within_95: true, status: 'accelerating-forecast' },
+      { issued: '2019-01-17T00:00:00', lead_days: 8, estimate: '2019-01-26T15:00:00', lower: '2019-01-22T00:00:00', upper: '2019-01-30T00:00:00', error_days: 1.6, collapse_within_95: true, status: 'accelerating-forecast' },
+    ],
+    disclaimer: 'Trend instability timelines are statistical extrapolations ... NOT a guaranteed or predicted collapse or failure date.',
+    ...over,
+  };
+}
+
+export const BACKTEST_MISSING = {
+  message: 'brumadinho_historic.csv not found in DATA_DIR. OPERA DISP-S1 does not cover South America ... It is not bundled.',
+  expected_file: 'DATA_DIR/brumadinho_historic.csv',
+  expected_columns: ['date', 'displacement_mm', 'point_id', 'temporal_coherence', 'longitude', 'latitude', 'zone', 'source'],
+  required_columns: ['date', 'displacement_mm'],
+};
+
+export function stressResult(intensity: number): StressTestResponse {
+  const sim: DataSource = { product: 'stress_test', file: 'Sierrita_coupled.zarr', variable: 'regime', synthetic_or_mock: true, label: 'SIMULATED STRESS TEST (test overlay)' };
+  return {
+    facility_id: 'sierrita', simulated: true, label: 'SIMULATED STRESS TEST: synthetic perturbation of the cached products, not an observation',
+    lat: 31.86, lon: -111.1,
+    parameters: { intensity, delta_sai_max: 0.35 * intensity, footprint_radius_m: 90, creep_onset: '2023-09-15T00:00:00', creep_lead_days: 30 + 150 * (1 - intensity), creep_A_yr_mm: 0.03, d_crest_target_m: 5 },
+    baseline: { sai: 0.08, regime: 1, regime_meaning: 'regime1-benign-consolidation', alert_tier: 0, kinematic_status: 'stable-below-2mm-yr', velocity_mm_yr: -0.5, failure_time_estimate: null },
+    scenario: { sai: 0.08 + 0.35 * intensity, regime: intensity > 0.5 ? 4 : 1, regime_meaning: intensity > 0.5 ? 'regime4-active-instability-tier3-critical' : 'regime1-benign-consolidation', alert_tier: intensity > 0.5 ? 3 : 0, kinematic_status: intensity > 0.5 ? 'accelerating-forecast' : 'moving-linear', velocity_mm_yr: -100 * intensity, failure_time_estimate: null },
+    times: DISP_TIMES,
+    baseline_displacement_mm: [0, -0.1, -0.2],
+    scenario_displacement_mm: [0, -2 * intensity, -10 * intensity],
+    scenario_series: { ...KINEMATICS, source: sim, fukuzono: null },
+    setback: { dates: DSWX_TIMES, baseline_d_crest_m: [150, 90], scenario_d_crest_m: [150, 90 - 85 * intensity], scenario_alerts: [[], intensity > 0.5 ? ['shrink_vs_baseline', 'crest_proximity'] : ['shrink_vs_baseline']] },
+    baseline_hazard_level: 'CRITICAL_TIER3', scenario_hazard_level: 'CRITICAL_TIER3',
+    baseline_regime_counts: { 'regime4-active-instability-tier3-critical': 16 },
+    scenario_regime_counts: { 'regime4-active-instability-tier3-critical': intensity > 0.5 ? 25 : 16 },
+    footprint: [[-111.101, 31.86], [-111.1, 31.861], [-111.099, 31.86], [-111.101, 31.86]],
+    regime_matrix: matrix('stress_test_regime', MATRICES.anomaly_regime(null).values, { categorical: true, source: sim, note: 'SIMULATED' }),
+  };
+}
+
+export const AUDIT_STATUS: AuditStatus = {
+  llm_available: false, model: 'claude-opus-5-5', effort: 'high', auto_mode_uses: 'deterministic', modes: ['auto', 'deterministic'],
+  standard: 'GISTM (Global Industry Standard on Tailings Management, 2020; co-convened by ICMM, UNEP and PRI)',
+};
+
+export const AUDIT: AuditResponse = {
+  facility_id: 'sierrita',
+  generated_by: 'deterministic-template',
+  brief: {
+    facility: 'Freeport-McMoRan Sierrita TSF', facility_id: 'sierrita', risk_classification: 'Tier-3 / Active Instability', hazard_level: 'CRITICAL_TIER3',
+    executive_summary: 'Freeport-McMoRan Sierrita TSF: screening classification Tier-3 / Active Instability. 82 confident high-SAI pixels.',
+    spectral_evidence: { summary: '82 confident pixels exceed the SAI threshold of 0.25.', facts: [{ label: 'Pixels with SAI above threshold (confident)', tool: 'get_spectral_alerts', path: 'counts.high_sai_pixels_confident', value: '82', unit: 'pixels' }] },
+    kinematic_evidence: {
+      summary: '40 accelerating pixels.', facts: [{ label: 'Accelerating pixels', tool: 'get_kinematics', path: 'accelerating_pixels', value: '40', unit: 'pixels' }],
+      prediction_windows: [{ label: 'Trend-instability window, pixel 1', tool: 'get_kinematics', path: 'accelerating_pixels_by_earliest_date[0]', estimate: '2025-01-08', lower_95: '2024-12-29', upper_95: '2025-01-19' }],
+    },
+    hydrological_evidence: { summary: 'Latest valid setback 90.0 m.', facts: [{ label: 'Latest valid D_crest', tool: 'get_hydrological_setback', path: 'latest_valid.d_crest_m', value: '90.0', unit: 'm' }] },
+    compliance_issues: [{ gistm_principle: 'Principle 7: design, implement and operate monitoring systems to manage risk', issue: 'Monitoring-based trigger and response actions should be reviewed.', evidence_paths: ['get_kinematics:accelerating_pixels'] }],
+    recommendations: ['Verify the flagged REGIME_4 area with in-situ instrumentation.'],
+    data_limitations: ['Some inputs are SYNTHETIC or MOCK data; this brief is not suitable for regulatory use.'],
+    disclaimer: 'Satellite screening only.',
+  },
+  validation: { passed: true, facts_checked: 3, prose_numbers_checked: 5, prediction_windows_checked: 1, tools_used: ['dashboard_validation_query'] },
+  tool_calls: [{ tool: 'dashboard_validation_query', input: { facility_id: 'sierrita' }, ok: true, error: null }],
+  turns: 0,
+  usage: {},
+};
+
 export interface StubOptions {
   facilitiesStatus?: number;
   available?: Record<string, string[]>;
@@ -185,19 +314,43 @@ export interface StubOptions {
   /** answer /pixel with the API's 404 "no data at this point" body */
   pixelUnavailable?: Record<string, string>;
   dashboard?: DashboardSummary | { status: number; detail: string };
+  healthDown?: boolean;
+  backtest?: BacktestResponse | 'missing' | { status: number; detail: string };
+  stress?: { status: number; detail: string };
+  audit?: AuditResponse | { status: number; detail: unknown };
+  auditStatus?: AuditStatus;
+  extraFacilities?: Facility[];
 }
 
 /** Install a fetch stub serving the fixtures; returns the mock (inspect `.mock.calls`). */
 export function stubFetch(opts: StubOptions = {}) {
   const available = opts.available ?? { sierrita: Object.keys(MATRICES).concat('water_class'), mission: [] };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-  const fn = vi.fn(async (input: RequestInfo | URL) => {
+  const fn = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean); // api, facilities, id?, sub?
-    if (url.pathname === '/api/facilities') return opts.facilitiesStatus ? json({ detail: 'database offline' }, opts.facilitiesStatus) : json(FACILITIES);
+    const facilities = [...FACILITIES, ...(opts.extraFacilities ?? [])];
+    if (url.pathname === '/api/facilities') return opts.facilitiesStatus ? json({ detail: 'database offline' }, opts.facilitiesStatus) : json(facilities);
+    if (url.pathname === '/api/health') return opts.healthDown ? json({ detail: 'down' }, 503) : json({ status: 'ok', database: 'x.duckdb', facilities: facilities.length, alerts: 1 });
+    if (url.pathname === '/api/audit/status') return json(opts.auditStatus ?? AUDIT_STATUS);
+    if (url.pathname === '/api/backtest/brumadinho') {
+      const b = opts.backtest ?? backtest();
+      if (b === 'missing') return json({ detail: BACKTEST_MISSING }, 404);
+      if ('status' in b && typeof b.status === 'number') return json({ detail: (b as { detail: string }).detail }, b.status);
+      const cutoff = Number(url.searchParams.get('cutoff_days') ?? 0);
+      return json({ ...(b as BacktestResponse), cutoff_days: cutoff, point_id: url.searchParams.get('point') ?? (b as BacktestResponse).point_id });
+    }
     const id = parts[2];
     const sub = parts[3];
-    if (!FACILITIES.some((f) => f.id === id)) return json({ detail: `unknown facility ${id}` }, 404);
+    if (!facilities.some((f) => f.id === id)) return json({ detail: `unknown facility ${id}` }, 404);
+    if (sub === 'stress-test') {
+      if (opts.stress) return json({ detail: opts.stress.detail }, opts.stress.status);
+      return json({ ...stressResult(Number(url.searchParams.get('intensity'))), lat: Number(url.searchParams.get('lat')), lon: Number(url.searchParams.get('lon')) });
+    }
+    if (sub === 'audit') {
+      const a = opts.audit ?? AUDIT;
+      return 'brief' in a ? json(a) : json({ detail: a.detail }, a.status);
+    }
     if (sub === 'alerts') return json(id === 'sierrita' ? [SIERRITA_ALERT] : []);
     if (sub === 'layers') return json(layerInfo(available[id] ?? []));
     if (sub === 'matrices') {
