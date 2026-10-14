@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, ApiError, type Alert, type Facility, type LayerInfo, type Matrix, type PixelResponse } from '@/utils/api';
+import { api, ApiError, type Alert, type DashboardSummary, type Facility, type LayerInfo, type Matrix, type PixelResponse } from '@/utils/api';
 import { OVERLAY_BY_ID, type OverlayId } from '@/utils/overlays';
 import { operaEpochs, type Epoch } from '@/utils/provenance';
 
@@ -37,6 +37,10 @@ function isAbort(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
 }
 
+function emptyPixel(facilityId: string, lat: number, lon: number, unavailable: Record<string, string>): PixelResponse {
+  return { facility_id: facilityId, lat, lon, utm_x: NaN, utm_y: NaN, utm_crs: '', kinematics: null, spectral: null, hydrology: null, classification: null, unavailable };
+}
+
 export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) {
   const [facilities, setFacilities] = useState<Facility[]>([]);
   const [latestAlerts, setLatestAlerts] = useState<Record<string, Alert | null>>({});
@@ -54,6 +58,11 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
   const [terrain, setTerrain] = useState(true);
   const [overlayOpacity, setOverlayOpacity] = useState(0.85);
   const [pick, setPick] = useState<PixelPick | null>(null);
+  const [summary, setSummary] = useState<{ state: LoadState; data: DashboardSummary | null; error: string | null }>({
+    state: 'idle',
+    data: null,
+    error: null,
+  });
 
   // ---- registry: facilities + latest alert per facility ------------------------------------
   const loadRegistry = useCallback(async (signal?: AbortSignal) => {
@@ -110,6 +119,23 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
       })
       .catch((err) => {
         if (!isAbort(err)) setLayerInfoState('error');
+      });
+    return () => ctrl.abort();
+  }, [selectedId]);
+
+  // Facility-level inspection summary (setback history, GISTM screening) for the inspector.
+  useEffect(() => {
+    if (!selectedId) {
+      setSummary({ state: 'idle', data: null, error: null });
+      return;
+    }
+    const ctrl = new AbortController();
+    setSummary({ state: 'loading', data: null, error: null });
+    api
+      .dashboard(selectedId, ctrl.signal)
+      .then((data) => setSummary({ state: 'ready', data, error: null }))
+      .catch((err) => {
+        if (!isAbort(err)) setSummary({ state: 'error', data: null, error: message(err) });
       });
     return () => ctrl.abort();
   }, [selectedId]);
@@ -194,7 +220,14 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
         .pixel(selectedId, lat, lon, ctrl.signal)
         .then((data) => setPick({ lon, lat, state: 'ready', data, error: null }))
         .catch((err) => {
-          if (!isAbort(err)) setPick({ lon, lat, state: 'error', data: null, error: message(err) });
+          if (isAbort(err)) return;
+          // 404 "no data at this point" lists why each product is missing: show that per panel.
+          const body = err instanceof ApiError ? (err.body as { unavailable?: Record<string, string> } | undefined) : undefined;
+          if (err instanceof ApiError && err.status === 404 && body?.unavailable) {
+            setPick({ lon, lat, state: 'ready', data: emptyPixel(selectedId, lat, lon, body.unavailable), error: null });
+            return;
+          }
+          setPick({ lon, lat, state: 'error', data: null, error: message(err) });
         });
     },
     [selectedId],
@@ -236,6 +269,7 @@ export function useDashboard(initialOverlays: OverlayId[] = ['anomaly_regime']) 
     setOverlayOpacity,
     pick,
     pickPixel,
+    summary,
     clearPick: () => setPick(null),
   };
 }

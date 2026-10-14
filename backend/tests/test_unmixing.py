@@ -344,7 +344,10 @@ def test_run_pipeline_writes_zarr_log_and_l2bmin_r2(M_full, wavelengths, tmp_pat
     summary = u.run_spectral_pipeline(src, out, log_path=log, l2bmin_path=l2bmin, settings=settings)
 
     ds = xr.open_zarr(out, decode_coords="all")
-    assert set(ds.data_vars) >= {"abundance", "rmse", "sai", "ndvi", "ndwi_swir", "confidence", "observability", "fraction_sum"}
+    assert set(ds.data_vars) >= {"abundance", "rmse", "sai", "ndvi", "ndwi_swir", "confidence", "observability", "fraction_sum", "reflectance"}
+    # The cube is kept for the inspector, with the fit mask alongside.
+    assert ds["reflectance"].dims == ("band", "y", "x") and ds.sizes["band"] == 285
+    assert int(ds["band_active"].sum()) == 245 and ds["wavelength"].size == 285
     assert ds["abundance"].encoding["compressor"].cname == "zstd"
     assert ds.rio.crs.to_epsg() == 32612
     assert list(ds["endmember"].values) == list(u.ENDMEMBERS)

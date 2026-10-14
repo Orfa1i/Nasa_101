@@ -108,6 +108,43 @@ class PointMatch(BaseModel):
     note: Optional[str] = None
 
 
+class FukuzonoFit(BaseModel):
+    """Inverse-velocity trend Lambda(t) = |v_LOS(t)|^-1 fitted over the last epochs (nearest cell).
+
+    The line is the Bayesian linear regression of Phase 3, re-evaluated with its full posterior
+    covariance; ``line_lower``/``line_upper`` bound the regression mean at 95 % (2 sigma). The
+    zero crossing is an *estimated change in velocity trend*, not a predicted failure date.
+    """
+
+    window_times: list[datetime] = Field(description="epochs used in the fit")
+    inverse_velocity_yr_mm: list[Optional[float]]
+    inverse_velocity_lower_yr_mm: list[Optional[float]]
+    inverse_velocity_upper_yr_mm: list[Optional[float]]
+    t0: datetime = Field(description="last epoch (the regression origin)")
+    lambda_0_yr_mm: float
+    slope_yr_mm_per_yr: float
+    slope_std: float
+    slope_significant: bool
+    line_times: list[datetime]
+    line_yr_mm: list[float]
+    line_lower_yr_mm: list[float]
+    line_upper_yr_mm: list[float]
+    crossing_estimate: Optional[datetime] = None
+    crossing_lower: Optional[datetime] = None
+    crossing_upper: Optional[datetime] = None
+    label: str = "Estimated change in velocity trend (inverse-velocity extrapolation), not a guaranteed failure date"
+
+    @model_validator(mode="after")
+    def _lengths(self) -> "FukuzonoFit":
+        n = len(self.window_times)
+        if not (len(self.inverse_velocity_yr_mm) == len(self.inverse_velocity_lower_yr_mm) == len(self.inverse_velocity_upper_yr_mm) == n):
+            raise ValueError("observed inverse velocity does not match window_times")
+        m = len(self.line_times)
+        if not (len(self.line_yr_mm) == len(self.line_lower_yr_mm) == len(self.line_upper_yr_mm) == m):
+            raise ValueError("regression line arrays do not match line_times")
+        return self
+
+
 class KinematicSeries(BaseModel):
     source: DataSource
     match: PointMatch
@@ -125,11 +162,13 @@ class KinematicSeries(BaseModel):
     acceleration_upper_mm_yr2: Optional[list[Optional[float]]] = None
     inverse_velocity_yr_mm: Optional[list[Optional[float]]] = None
     temporal_coherence: Optional[float] = None
+    coherence_threshold: float = 0.65
     status: Optional[str] = None
     instability_time: Optional[datetime] = None
     instability_time_lower: Optional[datetime] = None
     instability_time_upper: Optional[datetime] = None
     disclaimer: Optional[str] = None
+    fukuzono: Optional[FukuzonoFit] = None
 
     @model_validator(mode="after")
     def _lengths(self) -> "KinematicSeries":
@@ -137,6 +176,28 @@ class KinematicSeries(BaseModel):
         for name, value in self:
             if name != "times" and isinstance(value, list) and len(value) != n:
                 raise ValueError(f"{name} has {len(value)} values for {n} epochs")
+        return self
+
+
+class Spectrum(BaseModel):
+    """Measured reflectance of the nearest spectral cell and its NNLS reconstruction."""
+
+    match: PointMatch
+    wavelengths_nm: list[float]
+    reflectance: list[Optional[float]] = Field(description="all bands, including excluded ones")
+    active: list[bool] = Field(description="False for channels excluded from the fit (water-vapour windows)")
+    modelled: list[Optional[float]] = Field(description="M @ f on active channels; null on excluded ones")
+    excluded_windows_nm: list[list[float]]
+    abundance: dict[str, Optional[float]] = Field(description="fractions of this cell (the fit shown)")
+    rmse: Optional[float] = None
+    sai: Optional[float] = None
+    endmember_titles: dict[str, str] = {}
+
+    @model_validator(mode="after")
+    def _lengths(self) -> "Spectrum":
+        n = len(self.wavelengths_nm)
+        if not (len(self.reflectance) == len(self.active) == len(self.modelled) == n):
+            raise ValueError("spectrum arrays differ in length")
         return self
 
 
@@ -150,6 +211,8 @@ class SpectralPoint(BaseModel):
     confidence: Optional[float] = None
     observability: Optional[str] = None
     abundance: dict[str, Optional[float]] = {}
+    spectrum: Optional[Spectrum] = None
+    spectrum_unavailable: Optional[str] = None
 
 
 class TimeValue(BaseModel):

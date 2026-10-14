@@ -32,7 +32,7 @@ export default function Home() {
       </main>
       <div
         id="dashboard-panel"
-        className={`order-2 w-full shrink-0 overflow-y-auto border-t border-slate-800 lg:order-1 lg:block lg:h-full lg:w-[22rem] lg:border-r lg:border-t-0 xl:w-96 ${
+        className={`order-2 w-full shrink-0 overflow-y-auto border-t border-slate-800 lg:order-1 lg:block lg:h-full lg:w-[22rem] lg:border-r lg:border-t-0 xl:w-[26rem] 2xl:w-[30rem] ${
           panelOpen ? 'h-[45dvh]' : 'hidden'
         }`}
       >

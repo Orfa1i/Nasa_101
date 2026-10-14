@@ -241,6 +241,59 @@ def test_pixel_exact_cell(chain, client):
     assert p.hydrology.d_crest_m.values == [150.0, 90.0] and p.hydrology.water_class.values == [0.0, 0.0]
 
 
+def test_pixel_spectrum_and_fit(chain, client):
+    """The inspector's spectrum: all 285 bands, water-vapour gaps, and an NNLS fit that reproduces the RMSE."""
+    from app.pipelines import unmixing
+
+    _, _, lon, lat = block_cell(chain)
+    s = PixelResponse.model_validate(client.get("/api/facilities/sierrita/pixel", params={"lat": lat, "lon": lon}).json()).spectral
+    sp = s.spectrum
+    assert sp is not None and s.spectrum_unavailable is None
+    wl = np.array(sp.wavelengths_nm)
+    active = np.array(sp.active)
+    assert wl.size == 285 and active.sum() == 245
+    excluded = ((wl >= 1340) & (wl <= 1460)) | ((wl >= 1790) & (wl <= 1970))
+    assert np.array_equal(~active, excluded)
+    assert sp.excluded_windows_nm == [[1340.0, 1460.0], [1790.0, 1970.0]]
+    model = np.array([np.nan if v is None else v for v in sp.modelled])
+    refl = np.array([np.nan if v is None else v for v in sp.reflectance])
+    assert np.isnan(model[~active]).all() and np.isfinite(model[active]).all()
+    assert np.isfinite(refl[excluded]).all()  # measured values are kept; the client draws the gaps
+    # The fit shown is the fit that was scored: recomputed RMSE equals the stored RMSE of the cell.
+    rmse = float(np.sqrt(np.mean((refl[active] - model[active]) ** 2)))
+    assert rmse == pytest.approx(sp.rmse, abs=2e-5)
+    assert sp.abundance["Jarosite"] == pytest.approx(0.6, abs=0.05) and sp.sai > 0.25
+    assert set(sp.endmember_titles) == set(unmixing.ENDMEMBERS) and "Jarosite" in sp.endmember_titles["Jarosite"]
+
+
+def test_pixel_fukuzono_fit_matches_phase3(chain, client):
+    x, y, lon, lat = block_cell(chain)
+    k = PixelResponse.model_validate(client.get("/api/facilities/sierrita/pixel", params={"lat": lat, "lon": lon}).json()).kinematics
+    f = k.fukuzono
+    assert f is not None and "not a guaranteed failure date" in f.label
+    ds = xr.open_zarr(chain["settings"].cache_dir / "Sierrita_kinematics.zarr").sel(x=x, y=y, method="nearest")
+    assert f.slope_yr_mm_per_yr == pytest.approx(float(ds["fukuzono_slope"]), rel=1e-3)
+    assert f.lambda_0_yr_mm == pytest.approx(float(ds["fukuzono_lambda_0"]), rel=1e-3)
+    assert f.window_times == k.times[-kin.FUKUZONO_POINTS:] and f.t0 == k.times[-1]
+    # Crossing and bounds are the Phase 3 timeline; the regression mean reaches zero at the estimate.
+    assert (f.crossing_estimate, f.crossing_lower, f.crossing_upper) == (k.instability_time, k.instability_time_lower, k.instability_time_upper)
+    t = pd.to_datetime(f.line_times)
+    zero = t[int(np.argmin(np.abs(f.line_yr_mm)))]
+    assert abs((zero - pd.Timestamp(f.crossing_estimate)).days) <= (t[1] - t[0]).days + 1
+    assert all(lo <= m <= hi for lo, m, hi in zip(f.line_lower_yr_mm, f.line_yr_mm, f.line_upper_yr_mm))
+    assert t[-1] >= pd.Timestamp(f.crossing_upper)  # the band is drawn past the latest crossing bound
+    # Observed Lambda = 1/|v| at the cell.
+    v = ds["velocity"].values[-kin.FUKUZONO_POINTS:]
+    assert f.inverse_velocity_yr_mm == pytest.approx(list(1 / np.abs(v)), rel=1e-4)
+
+
+def test_pixel_without_trend_has_no_fit(chain, client):
+    gx0, _, _, gy1 = _site_grid()
+    lon, lat = TO_LONLAT.transform(gx0 + 150, gy1 - 810)
+    k = PixelResponse.model_validate(client.get("/api/facilities/sierrita/pixel", params={"lat": lat, "lon": lon}).json()).kinematics
+    assert k.status in {"stable-below-2mm-yr", "moving-linear"} and k.fukuzono is None and k.coherence_threshold == 0.65
+
+
 def test_pixel_interpolates_between_cells(chain, client):
     x, y, _, _ = block_cell(chain)
     lon, lat = TO_LONLAT.transform(x + 11.0, y - 7.0)

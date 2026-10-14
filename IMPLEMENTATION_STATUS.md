@@ -12,7 +12,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 6 | API and database | **Done**: tests pass, unmocked; serves real GLO-30 terrain for Sierrita. The other layers wait on real EMIT, DISP-S1 and DSWx inputs |
 | 7 | Audit copilot | **Done**: tests pass, including the Claude tool-use loop against a scripted client. No live Claude call has been made (no API credentials in this sandbox), and every brief so far was built from synthetic test products |
 | 8 | Next.js / deck.gl map | **Done**: unit, component and browser tests pass against the real backend (serving the synthetic demo site), with real WebGL rendering in headless Chromium. No Mapbox token was available, so only the open MapLibre / Terrarium path has run, and with locally served stand-in tiles |
-| 9 | Inspector panels | Not started |
+| 9 | Inspector panels | **Done**: unit, component and browser tests pass, including charts checked against the real API's pixel responses for the synthetic demo site. No real EMIT spectrum or DISP-S1 series has been plotted yet |
 | 10 | Scenarios, backtest UI, CI | Not started |
 
 ---
@@ -867,4 +867,111 @@ $ cd backend && pytest
 * **Synthetic demo data only.** The demo covers a ~1 km synthetic site, so it occupies a small part of the Sierrita bbox. Real layers still wait on real EMIT, DISP-S1 and DSWx inputs (Phases 2–6).
 * **Large JSON matrices.** Each overlay is a JSON matrix (~0.5 MB for Sierrita) rendered client-side. That is fine at facility scale; binary tiles would scale better.
 * **Main-thread terrain decoding.** Terrain tiles are decoded on the main thread to avoid the CDN worker. This costs some frame time while tiles load.
-* **Phases 9–10 not started.** Inspector charts, the audit UI and scenarios come in Phases 9–10. The sidebar's cell panel is a text summary for now.
+* **Phase 10 not started.** The audit UI and scenarios come in Phase 10. (Phase 9 replaced the sidebar's text-only cell panel with the Double Inspector.)
+
+---
+
+## Phase 9: Double Inspector
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `frontend/src/components/Inspector.tsx` | The Double Inspector in the sidebar: coordinate picker, three tabbed chart panels (Spectroscopy, Kinematics, Hydrology) and the cell summary. Charts use Recharts 2.15.4. |
+| `frontend/src/utils/inspector.ts` | Pure data preparation: spectrum rows with gaps, endmember groups, GP rows with ±2σ bands, Fukuzono rows, coherence check, setback alert levels and GISTM screening checks. Also the chart and status palettes. |
+| `frontend/src/hooks/useDashboard.ts`, `utils/api.ts` | The `/dashboard` summary is loaded per facility, with typed `Spectrum`, `FukuzonoFit`, `KinematicSeries` and setback models. A 404 "no data at this point" response becomes per-panel empty states, carrying the API's reasons. |
+| `frontend/src/components/Sidebar.tsx`, `pages/index.tsx` | The inspector replaces the text-only cell panel. The sidebar widens to 26 rem (xl) and 30 rem (2xl) for the charts. |
+| `backend/app/pipelines/unmixing.py` | The spectral product now keeps the unit-scaled reflectance cube (`reflectance(band, y, x)`), with `wavelength` and `band_active` coordinates, chunked so one pixel spectrum is one read. |
+| `backend/app/api/schemas.py`, `endpoints.py` | `/pixel` gains `spectral.spectrum` and `kinematics.fukuzono`, plus `coherence_threshold` (detail under *Behaviour*). |
+| Tests | `frontend/src/__tests__/inspector.test.tsx` (17), `frontend/e2e/inspector.spec.ts` (3), updates to `dashboard.test.tsx` and `map.spec.ts`, 3 new backend API tests and an extended unmixing test. |
+
+### Behaviour
+
+* **Coordinate picker.**
+  * Clicking the map inside the selected footprint (MapViewer) and the latitude/longitude form both query `GET /api/facilities/{id}/pixel`, and populate all panels.
+  * Before any request, the form rejects non-numeric input and points outside the facility bbox.
+  * The header shows the picked coordinate, the regime and the classification's trend-change window, plus any product that is unavailable.
+* **Spectroscopy panel.**
+  * **Spectrum chart.** The cell's measured 285-band VSWIR reflectance and its NNLS reconstruction (M·f). The 40 water-vapour channels (1340–1460 nm, 1790–1970 nm) are left as **gaps** in both lines (`connectNulls=false`) and shaded "H₂O".
+  * **Abundance chart.** Fractions as horizontal bars, grouped as:
+    * Jarosite;
+    * Smectite (the montmorillonite endmember);
+    * Goethite;
+    * Other alteration (ferrihydrite, gypsum);
+    * Background (quartz-feldspar, water/shade).
+  * **Tiles.** SAI (threshold 0.25) and unmixing RMSE (limit 0.05), each with a status icon and label.
+  * **Same-cell fit.** The spectrum, fit, fractions, RMSE and SAI all come from the **same nearest cell**, so the error shown is the error of the plotted fit.
+  * **Backend support.** `spectral.spectrum` carries all 285 bands, the active mask, the excluded windows, and `modelled` (null on excluded channels), computed from the run's own endmember library.
+* **Kinematics panel.**
+  * **Charts.** Cumulative LOS displacement (observations plus the GP-smoothed curve), GP velocity and GP acceleration. Each has its shaded **95 % (±2σ) band**, and each quantity has its own chart and axis.
+  * **Fukuzono chart.**
+    * Observed Λ = 1/|v|: the fitted epochs filled, earlier epochs hollow.
+    * The regression line with its **95 % prediction band** extended to Λ = 0.
+    * The crossing window shaded, with the label "**Estimated change in velocity trend (inverse-velocity extrapolation), not a guaranteed failure date**", the dates and the late-bias note.
+  * **Coherence alert.** If temporal coherence is below 0.65 (or the status is decorrelated), an error alert says the GP fit is unreliable, and the velocity, acceleration and trend charts are replaced by explanations. Raw observations are still plotted.
+  * **Backend support.** `kinematics.fukuzono` re-evaluates the Phase 3 Bayesian regression for the cell with its full posterior covariance. It uses the same Λ over the last 5 epochs, with σ = (upper − lower)/4. The fitted slope and Λ₀ match the stored Phase 3 values; the crossing and its bounds are the stored Phase 3 timeline.
+* **Hydrology panel.**
+  * **Chart.** D_crest(t) with the 15 m proximity threshold line. Each epoch's marker is coloured by alert level:
+    * Critical: proximity.
+    * Alert: shrink of more than 30 m.
+    * OK: no alert.
+    * Unknown: not a valid epoch.
+  * **Table.** Each epoch with its changes, alerts in words, and a status icon and label.
+  * **GISTM screening checks.** Each check is tagged with a principle and paraphrased:
+    * latest setback ≥ 15 m (Principle 6);
+    * no loss beyond 30 m since the first epoch (Principle 6);
+    * no loss beyond 30 m between epochs (Principle 6);
+    * every DSWx epoch valid (Principle 7);
+    * crest geometry on record (Principle 2).
+  * **Flagged items.** The Phase 7 inspection tools' candidate items are listed, labelled "screening aid, not a compliance determination".
+* **Charts and accessibility.**
+  * Colours are the dataviz reference palette's dark steps: blue = observed/measured, orange = model/fit. The pair passes every validator check on the `#0f172a` chart surface.
+  * Status colours always come with an icon and a label.
+  * Charts have tooltips and legends, one y-axis each (no dual axes), and no animation.
+* **Empty and degraded data.** Each case gets an explanatory message instead of a chart:
+  * no product at the cell (with the API's reason, including 404 "no data");
+  * a spectral product without the stored cube;
+  * no unmixing result;
+  * an empty displacement series;
+  * no GP fit;
+  * no converging trend;
+  * no setback product;
+  * an unreachable summary.
+
+### Verification
+
+```
+$ cd frontend && npm run typecheck && npm run lint && npm run build && npm test
+47 passed
+$ E2E_PYTHON=... E2E_DATA_DIR=<demo dir> npm run test:e2e
+18 passed (map 7, responsive 8, inspector 3)
+$ cd backend && pytest
+208 passed, 5 skipped
+```
+
+* **Backend.**
+  * The `/pixel` spectrum has 285 bands, of which 245 are active, and the inactive ones are exactly the water-vapour windows. The RMSE recomputed from the returned measured and fitted spectra equals the stored RMSE of the cell (±2e-5).
+  * The Fukuzono slope and Λ₀ equal the Phase 3 product (relative 1e-3). The regression mean reaches zero at the stored estimate, and the band covers the latest crossing bound.
+  * A stable cell has no fit.
+  * The spectral product stores the cube.
+* **Vitest (17 inspector tests).**
+  * **Data preparation:** gap rows; endmember groups; band alignment; Fukuzono context and window; the coherence rule; setback levels and checks.
+  * **Rendered SVG:**
+    * the form sends exactly the typed coordinates, and rejects bad input without a request;
+    * the spectrum draws two lines of three segments each, with two "H₂O" areas;
+    * five abundance bars and the tile statuses;
+    * displacement bands and observation markers, and the Fukuzono label, dates and crossing area;
+    * the low-coherence alert, the D_crest dots, table and checks.
+  * **Empty and error cases:** no products, the 404 with per-product reasons, no stored cube, empty series, no setback, and a failed summary.
+* **Playwright (real backend).**
+  * A cell picked through the form gives a request with exactly those coordinates. The charts match the API response: SAI, RMSE, the Jarosite fraction, the number of observations, the Fukuzono crossing dates, the D_crest dots and the GISTM item count.
+  * A decorrelated cell shows the coherence alert.
+  * Mission (no products) shows the empty states.
+  * In the map test, clicking a Regime-4 cell sends its coordinate (within one cell) and fills the inspector.
+
+### Known gaps
+
+* **Synthetic demo only.** No real EMIT spectrum or DISP-S1 series has been plotted. Spectral products made before this phase lack the reflectance cube (the panel says to re-run `unmix`).
+* **Product size.** Storing the cube adds 285 bands per pixel to the spectral product (about 25 MB uncompressed for a 150 × 150 crop).
+* **Historic series.** Brumadinho's point series get a Fukuzono fit only once analysed by Phase 3, and the historical CSV has still not been supplied.
+* **GISTM checks need review.** They are setback-only screening rules with paraphrased principles; a qualified reviewer must interpret them.

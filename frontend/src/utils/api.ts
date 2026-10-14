@@ -78,6 +78,112 @@ export interface PointMatch {
   note: string | null;
 }
 
+export interface Spectrum {
+  match: PointMatch;
+  wavelengths_nm: number[];
+  /** All 285 bands, including the excluded water-vapour channels. */
+  reflectance: (number | null)[];
+  /** False for channels excluded from the NNLS fit. */
+  active: boolean[];
+  /** NNLS reconstruction M @ f; null on excluded channels. */
+  modelled: (number | null)[];
+  excluded_windows_nm: [number, number][];
+  abundance: Record<string, number | null>;
+  rmse: number | null;
+  sai: number | null;
+  endmember_titles: Record<string, string>;
+}
+
+export interface FukuzonoFit {
+  window_times: string[];
+  inverse_velocity_yr_mm: (number | null)[];
+  inverse_velocity_lower_yr_mm: (number | null)[];
+  inverse_velocity_upper_yr_mm: (number | null)[];
+  t0: string;
+  lambda_0_yr_mm: number;
+  slope_yr_mm_per_yr: number;
+  slope_std: number;
+  slope_significant: boolean;
+  line_times: string[];
+  line_yr_mm: number[];
+  line_lower_yr_mm: number[];
+  line_upper_yr_mm: number[];
+  crossing_estimate: string | null;
+  crossing_lower: string | null;
+  crossing_upper: string | null;
+  label: string;
+}
+
+type Series = (number | null)[];
+
+export interface KinematicSeries {
+  source: DataSource;
+  match: PointMatch;
+  point_id?: string | null;
+  times: string[];
+  displacement_mm: Series;
+  displacement_smooth_mm?: Series | null;
+  displacement_smooth_lower_mm?: Series | null;
+  displacement_smooth_upper_mm?: Series | null;
+  velocity_mm_yr?: Series | null;
+  velocity_lower_mm_yr?: Series | null;
+  velocity_upper_mm_yr?: Series | null;
+  acceleration_mm_yr2?: Series | null;
+  acceleration_lower_mm_yr2?: Series | null;
+  acceleration_upper_mm_yr2?: Series | null;
+  inverse_velocity_yr_mm?: Series | null;
+  temporal_coherence: number | null;
+  coherence_threshold?: number;
+  status: string | null;
+  instability_time: string | null;
+  instability_time_lower: string | null;
+  instability_time_upper: string | null;
+  disclaimer: string | null;
+  fukuzono?: FukuzonoFit | null;
+}
+
+export interface SetbackEpoch {
+  date: string;
+  d_crest_m: number | null;
+  status: string;
+  delta_vs_baseline_m: number | null;
+  delta_vs_previous_m: number | null;
+  alerts: string[];
+  observed_fraction_pct: number | null;
+  water_area_m2: number | null;
+}
+
+export interface SetbackSummary {
+  facility_id: string;
+  available: boolean;
+  reason?: string;
+  source_file?: string;
+  crest_line?: string | null;
+  thresholds?: { shrink_alert_m: number; proximity_alert_m: number };
+  n_epochs?: number;
+  n_valid_epochs?: number;
+  latest_valid?: SetbackEpoch | null;
+  min_valid_d_crest_m?: number | null;
+  encroaching?: boolean;
+  series?: SetbackEpoch[];
+}
+
+export interface GistmIssue {
+  gistm_principle: string;
+  issue: string;
+  evidence_paths: string[];
+}
+
+/** GET /api/facilities/{id}/dashboard (Phase 7 inspection tools); only the fields the UI reads. */
+export interface DashboardSummary {
+  facility_id: string;
+  risk_classification: string;
+  hydrological_setback: SetbackSummary;
+  consistency_checks: { check: string; passed: boolean; detail: string }[];
+  all_checks_passed: boolean;
+  gistm_screening: { candidate_issues: GistmIssue[]; recommendations: string[]; data_limitations: string[] };
+}
+
 export interface PixelResponse {
   facility_id: string;
   lat: number;
@@ -85,19 +191,7 @@ export interface PixelResponse {
   utm_x: number;
   utm_y: number;
   utm_crs: string;
-  kinematics: {
-    source: DataSource;
-    match: PointMatch;
-    times: string[];
-    displacement_mm: (number | null)[];
-    velocity_mm_yr?: (number | null)[] | null;
-    temporal_coherence: number | null;
-    status: string | null;
-    instability_time: string | null;
-    instability_time_lower: string | null;
-    instability_time_upper: string | null;
-    disclaimer: string | null;
-  } | null;
+  kinematics: KinematicSeries | null;
   spectral: {
     source: DataSource;
     match: PointMatch;
@@ -107,6 +201,8 @@ export interface PixelResponse {
     confidence: number | null;
     observability: string | null;
     abundance: Record<string, number | null>;
+    spectrum?: Spectrum | null;
+    spectrum_unavailable?: string | null;
   } | null;
   hydrology: {
     source: DataSource;
@@ -135,7 +231,7 @@ export interface PixelResponse {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, public detail: string, public path: string) {
+  constructor(public status: number, public detail: string, public path: string, public body?: unknown) {
     super(`${status} ${path}: ${detail}`);
     this.name = 'ApiError';
   }
@@ -153,13 +249,15 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   }
   if (!res.ok) {
     let detail = res.statusText;
+    let parsed: unknown;
     try {
       const body = await res.json();
-      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body);
+      parsed = body.detail ?? body;
+      detail = typeof body.detail === 'string' ? body.detail : typeof body.detail?.message === 'string' ? body.detail.message : JSON.stringify(parsed);
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, detail, path);
+    throw new ApiError(res.status, detail, path, parsed);
   }
   return (await res.json()) as T;
 }
@@ -172,6 +270,7 @@ export const api = {
   layers: (id: string, signal?: AbortSignal) => getJson<LayerInfo[]>(`/api/facilities/${enc(id)}/layers`, signal),
   matrix: (id: string, layer: string, t?: string | null, signal?: AbortSignal) =>
     getJson<Matrix>(`/api/facilities/${enc(id)}/matrices?layer=${enc(layer)}${t ? `&t=${enc(t)}` : ''}`, signal),
+  dashboard: (id: string, signal?: AbortSignal) => getJson<DashboardSummary>(`/api/facilities/${enc(id)}/dashboard`, signal),
   pixel: (id: string, lat: number, lon: number, signal?: AbortSignal) =>
     getJson<PixelResponse>(`/api/facilities/${enc(id)}/pixel?lat=${lat}&lon=${lon}`, signal),
 };

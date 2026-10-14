@@ -1,7 +1,8 @@
 /**
  * Dashboard controls: active facility picker, overlay matrix toggles, the OPERA epoch timeline and
- * the selected-pixel panel (filled by clicking the map).
+ * the Double Inspector (spectroscopy / kinematics / hydrology charts of the picked cell).
  */
+import Inspector from '@/components/Inspector';
 import type { Dashboard } from '@/hooks/useDashboard';
 import { ALERT_COLORS, ALERT_LABELS, alertColorName } from '@/utils/facilities';
 import { OVERLAYS, type OverlayDef } from '@/utils/overlays';
@@ -260,96 +261,6 @@ export function EpochTimeline({ dash }: { dash: Dashboard }) {
   );
 }
 
-function fmt(v: number | null | undefined, digits = 3, unit = ''): string {
-  return v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}${unit ? ` ${unit}` : ''}`;
-}
-
-export function PixelPanel({ dash }: { dash: Dashboard }) {
-  const { pick, selectedId } = dash;
-  if (!selectedId) return null;
-  if (!pick) return <p className="text-sm text-slate-400">Click inside the facility footprint to inspect a 30 m cell.</p>;
-  const d = pick.data;
-  return (
-    <div data-testid="pixel-panel" className="space-y-2 text-sm">
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-xs">
-          {pick.lat.toFixed(5)}, {pick.lon.toFixed(5)}
-        </span>
-        <button type="button" className="text-xs text-slate-400 underline" onClick={dash.clearPick}>
-          Clear
-        </button>
-      </div>
-      {pick.state === 'loading' && <p className="text-slate-400">Loading cell…</p>}
-      {pick.state === 'error' && (
-        <p role="alert" className="text-red-300">
-          {pick.error}
-        </p>
-      )}
-      {d && (
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
-          {d.classification && (
-            <>
-              <dt className="text-slate-400">Regime</dt>
-              <dd data-testid="pixel-regime">
-                {d.classification.regime} · {d.classification.regime_meaning}
-                {d.classification.low_confidence && <span className="ml-1 text-amber-300">(low confidence)</span>}
-              </dd>
-              {d.classification.failure_time_estimate && (
-                <>
-                  <dt className="text-slate-400">Trend change</dt>
-                  <dd>
-                    {formatDate(d.classification.failure_time_estimate)} [95 %: {formatDate(d.classification.failure_time_lower)} –{' '}
-                    {formatDate(d.classification.failure_time_upper)}]
-                  </dd>
-                </>
-              )}
-            </>
-          )}
-          {d.spectral && (
-            <>
-              <dt className="text-slate-400">SAI</dt>
-              <dd>{fmt(d.spectral.sai)}</dd>
-              <dt className="text-slate-400">Unmixing RMSE</dt>
-              <dd data-testid="pixel-rmse">
-                {fmt(d.spectral.rmse, 4)} {d.spectral.rmse !== null && d.spectral.rmse > 0.05 && <span className="text-amber-300">above 0.05</span>}
-              </dd>
-            </>
-          )}
-          {d.kinematics && (
-            <>
-              <dt className="text-slate-400">Coherence</dt>
-              <dd data-testid="pixel-coherence">
-                {fmt(d.kinematics.temporal_coherence, 2)}{' '}
-                {d.kinematics.temporal_coherence !== null && d.kinematics.temporal_coherence < 0.65 && (
-                  <span className="text-amber-300">decorrelated</span>
-                )}
-              </dd>
-              <dt className="text-slate-400">Kinematic status</dt>
-              <dd>{d.kinematics.status ?? '—'}</dd>
-            </>
-          )}
-          {d.hydrology && (
-            <>
-              <dt className="text-slate-400">Elevation / slope</dt>
-              <dd>
-                {fmt(d.hydrology.elevation_m, 0, 'm')} / {fmt(d.hydrology.slope_deg, 1, '°')}
-              </dd>
-            </>
-          )}
-          {Object.entries(d.unavailable).map(([k, v]) => (
-            <div key={k} className="col-span-2 text-slate-500">
-              {k}: {v}
-            </div>
-          ))}
-        </dl>
-      )}
-      {d?.classification && (
-        <p className="text-[11px] text-slate-500">Trend-change dates are statistical extrapolations, not failure forecasts.</p>
-      )}
-    </div>
-  );
-}
-
 export default function Sidebar({ dash, className = '' }: SidebarProps) {
   return (
     <aside data-testid="sidebar" aria-label="Dashboard controls" className={`flex flex-col bg-slate-950 text-slate-100 ${className}`}>
@@ -366,8 +277,8 @@ export default function Sidebar({ dash, className = '' }: SidebarProps) {
       <Section title="OPERA timeline" id="sec-timeline">
         <EpochTimeline dash={dash} />
       </Section>
-      <Section title="Selected cell" id="sec-pixel">
-        <PixelPanel dash={dash} />
+      <Section title="Double Inspector" id="sec-inspector">
+        <Inspector dash={dash} />
       </Section>
     </aside>
   );

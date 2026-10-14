@@ -44,6 +44,7 @@ from app.api.schemas import (
     ClassificationPoint,
     DataSource,
     Facility,
+    FukuzonoFit,
     Health,
     HydrologyPoint,
     KinematicSeries,
@@ -52,6 +53,7 @@ from app.api.schemas import (
     PixelResponse,
     PointMatch,
     SpectralPoint,
+    Spectrum,
     TimeValue,
 )
 from app.config import Settings, get_settings
@@ -352,6 +354,63 @@ def _raster_kinematics(settings: Settings, prefix: str, x: float, y: float) -> K
         instability_time_lower=L.json_time(near("instability_time_lower")),
         instability_time_upper=L.json_time(near("instability_time_upper")),
         disclaimer=ds.attrs.get("disclaimer"),
+        fukuzono=_fukuzono_fit(ds.sel(x=loc.xn, y=loc.yn)),
+    )
+
+
+def _fukuzono_fit(cell: xr.Dataset) -> Optional[FukuzonoFit]:
+    """Re-evaluate the Phase 3 inverse-velocity regression of one cell/point with its full covariance.
+
+    The regression inputs are the stored Lambda = 1/|v| over the last ``FUKUZONO_POINTS`` epochs with
+    sigma = (upper - lower) / 4, exactly as in ``kinematics.fukuzono_forecast``; the zero crossing and
+    its 95 % bounds are the stored Phase 3 values.
+    """
+    from app.pipelines import kinematics as kin
+
+    needed = {"inverse_velocity", "inverse_velocity_lower", "inverse_velocity_upper", "fukuzono_slope", "fukuzono_lambda_0"}
+    if not needed <= set(cell.data_vars) or not np.isfinite(float(cell["fukuzono_slope"].values)):
+        return None
+    times = pd.to_datetime(cell["time"].values)
+    n = kin.FUKUZONO_POINTS
+    lam = cell["inverse_velocity"].values[-n:].astype(np.float64)
+    lo = cell["inverse_velocity_lower"].values[-n:].astype(np.float64)
+    hi = cell["inverse_velocity_upper"].values[-n:].astype(np.float64)
+    if lam.size < n or not (np.isfinite(lam).all() and np.isfinite(lo).all() and np.isfinite(hi).all()):
+        return None
+    t0 = times[-1]
+    x = ((times[-n:] - t0).total_seconds() / 86400.0 / kin.DAYS_PER_YEAR).to_numpy()
+    (b0, b1), cov = kin.bayesian_linear_fit(x, lam, (hi - lo) / 4.0)
+    if b1 >= 0:
+        return None
+
+    crossing = L.json_time(cell["instability_time"].values) if "instability_time" in cell else None
+    crossing_lo = L.json_time(cell["instability_time_lower"].values) if "instability_time_lower" in cell else None
+    crossing_hi = L.json_time(cell["instability_time_upper"].values) if "instability_time_upper" in cell else None
+    years = lambda when: (pd.Timestamp(when) - t0).total_seconds() / 86400.0 / kin.DAYS_PER_YEAR  # noqa: E731
+    end = years(crossing_hi) if crossing_hi is not None else -b0 / b1
+    end = min(max(end, 0.0) * 1.15 + 1e-3, 5.0)  # a little past the latest crossing bound, at most 5 years
+    grid = np.linspace(x[0], end, 60)
+    mean = b0 + b1 * grid
+    sd = np.sqrt(np.maximum(cov[0, 0] + 2 * grid * cov[0, 1] + grid**2 * cov[1, 1], 0.0))
+    line_times = [(t0 + pd.Timedelta(days=float(g) * kin.DAYS_PER_YEAR)).floor("s").to_pydatetime() for g in grid]
+    significant = bool(cell["fukuzono_slope_significant"].values) if "fukuzono_slope_significant" in cell else bool(b1 + 2 * np.sqrt(cov[1, 1]) < 0)
+    return FukuzonoFit(
+        window_times=[t.to_pydatetime() for t in times[-n:]],
+        inverse_velocity_yr_mm=L.json_list(lam),
+        inverse_velocity_lower_yr_mm=L.json_list(lo),
+        inverse_velocity_upper_yr_mm=L.json_list(hi),
+        t0=t0.to_pydatetime(),
+        lambda_0_yr_mm=float(b0),
+        slope_yr_mm_per_yr=float(b1),
+        slope_std=float(np.sqrt(cov[1, 1])),
+        slope_significant=significant,
+        line_times=line_times,
+        line_yr_mm=[float(v) for v in mean],
+        line_lower_yr_mm=[float(v) for v in mean - 2 * sd],
+        line_upper_yr_mm=[float(v) for v in mean + 2 * sd],
+        crossing_estimate=crossing,
+        crossing_lower=crossing_lo,
+        crossing_upper=crossing_hi,
     )
 
 
@@ -426,6 +485,7 @@ def _point_series(ds: xr.Dataset, file: str, lat: float, lon: float, *, analysed
         instability_time_lower=L.json_time(p["instability_time_lower"].values) if "instability_time_lower" in p else None,
         instability_time_upper=L.json_time(p["instability_time_upper"].values) if "instability_time_upper" in p else None,
         disclaimer=ds.attrs.get("disclaimer") or kin.DISCLAIMER,
+        fukuzono=_fukuzono_fit(p) if analysed else None,
     )
 
 
@@ -440,12 +500,57 @@ def _spectral_point(settings: Settings, prefix: str, x: float, y: float) -> Spec
     if "abundance" in ds:
         values, _ = L.sample(ds["abundance"], loc, interpolate=True)
         abundance = dict(zip([str(e) for e in ds["endmember"].values], L.json_list(values)))
+    spectrum, why = _spectrum(ds, loc)
     return SpectralPoint(
         source=source,
         match=_match(loc, "exact" if loc.exact else "bilinear", None if loc.exact else "continuous values bilinear; observability nearest"),
         sai=val("sai"), rmse=val("rmse"), ndvi=val("ndvi"), ndwi_swir=val("ndwi_swir"), confidence=val("confidence"),
         observability=meanings[obs] if obs is not None and 0 <= obs < len(meanings) else None,
         abundance=abundance,
+        spectrum=spectrum,
+        spectrum_unavailable=why,
+    )
+
+
+def _spectrum(ds: xr.Dataset, loc: L.PointLocator) -> tuple[Optional[Spectrum], Optional[str]]:
+    """Measured spectrum of the nearest cell and its NNLS reconstruction M @ f (same library as the run)."""
+    from app.pipelines import unmixing
+
+    if "reflectance" not in ds or "wavelength" not in ds.coords:
+        return None, "this spectral product has no reflectance cube (re-run `unmix` to store it)"
+    refl = ds["reflectance"].sel(x=loc.xn, y=loc.yn).values.astype(np.float64)
+    if not np.isfinite(refl).any():
+        return None, "no reflectance at this cell"
+    wl = ds["wavelength"].values.astype(np.float64)
+    active = ds["band_active"].values.astype(bool) if "band_active" in ds.coords else unmixing.active_band_mask(wl)
+    names = [str(e) for e in ds["endmember"].values]
+    f = ds["abundance"].sel(x=loc.xn, y=loc.yn).values.astype(np.float64)
+    modelled = np.full(wl.shape, np.nan)
+    titles: dict[str, str] = {}
+    try:
+        lib_file = ds.attrs.get("endmember_library_file")
+        library = unmixing.load_spectral_library(unmixing.REFERENCE_DIR / lib_file if lib_file else None, endmembers=names)
+        titles = dict(library.titles)
+        if np.isfinite(f).all():
+            modelled[active] = unmixing.build_endmember_matrix(wl[active], library) @ f
+    except (FileNotFoundError, unmixing.SpectralError) as exc:
+        logger.warning("Spectrum model unavailable: %s", exc)
+    windows = json.loads(ds.attrs.get("water_vapor_windows_nm", json.dumps(unmixing.WATER_VAPOR_WINDOWS_NM)))
+    near = lambda v: L.json_scalar(ds[v].sel(x=loc.xn, y=loc.yn).values) if v in ds else None  # noqa: E731
+    return (
+        Spectrum(
+            match=_match(loc, "exact" if loc.exact else "nearest", None if loc.exact else "spectrum, fit and fractions of the nearest cell"),
+            wavelengths_nm=[round(float(w), 4) for w in wl],
+            reflectance=L.json_list(np.round(refl, 6)),
+            active=[bool(a) for a in active],
+            modelled=L.json_list(np.round(modelled, 6)),
+            excluded_windows_nm=[[float(a), float(b)] for a, b in windows],
+            abundance=dict(zip(names, L.json_list(f))),
+            rmse=near("rmse"),
+            sai=near("sai"),
+            endmember_titles=titles,
+        ),
+        None,
     )
 
 

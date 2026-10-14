@@ -381,6 +381,15 @@ def process_reflectance(
         coords={"endmember": list(library.endmembers), "y": rfl["y"].values, "x": rfl["x"].values},
     )
     ds["fraction_sum"] = ds["fraction_sum"].where(~no_data)
+    # The full (unit-scaled) cube is kept so the inspector can plot the measured spectrum of a
+    # cell next to its NNLS reconstruction; `band_active` marks the channels used in the fit.
+    ds["reflectance"] = (("band", "y", "x"), cube.astype(np.float32))
+    ds = ds.assign_coords(
+        band=np.arange(1, wl.size + 1, dtype=np.int16),
+        wavelength=("band", wl.astype(np.float32)),
+        band_active=("band", active),
+    )
+    ds["reflectance"].attrs["long_name"] = "surface reflectance (unit scale); water-vapour channels have band_active=False"
     ds["observability"].attrs.update(
         flag_values=[OBSERVABLE, VEGETATED, NO_DATA, POOR_FIT], flag_meanings=FLAG_MEANINGS
     )
@@ -538,6 +547,9 @@ def write_spectral_zarr(ds: xr.Dataset, output_path: Path) -> None:
             ds[name].attrs["grid_mapping"] = "spatial_ref"
     compressor = zarr.Blosc(cname="zstd", clevel=5, shuffle=zarr.Blosc.BITSHUFFLE)
     encoding = {name: {"compressor": compressor} for name in ds.data_vars}
+    if "reflectance" in ds:
+        # One chunk holds every band of a 64 x 64 block, so a single-pixel spectrum is one read.
+        encoding["reflectance"]["chunks"] = (ds.sizes["band"], min(64, ds.sizes["y"]), min(64, ds.sizes["x"]))
     ds.to_zarr(output_path, mode="w", consolidated=True, encoding=encoding)
 
 

@@ -198,9 +198,13 @@ describe('dashboard', () => {
     expect(Number(q.get('lon'))).toBeCloseTo(-111.112, 9);
     const panel = screen.getByTestId('pixel-panel');
     await waitFor(() => expect(within(panel).getByTestId('pixel-regime')).toHaveTextContent(`4 · ${PIXEL.classification!.regime_meaning}`));
-    expect(within(panel).getByTestId('pixel-rmse')).toHaveTextContent('0.0123');
-    expect(within(panel).getByTestId('pixel-coherence')).toHaveTextContent('0.91');
     expect(panel).toHaveTextContent('2025-01-13 [95 %: 2024-12-31 – 2025-01-27]');
+    // The click populated the inspector charts.
+    expect(screen.getByTestId('chart-spectrum')).toBeInTheDocument();
+    expect(screen.getByTestId('pixel-rmse')).toHaveTextContent('0.0123');
+    await userEvent.click(screen.getByTestId('tab-kinematics'));
+    expect(screen.getByTestId('pixel-coherence')).toHaveTextContent('0.91');
+    expect(screen.getByTestId('chart-fukuzono')).toBeInTheDocument();
     expect(panel).toHaveTextContent('hydrology: Sierrita_hydrology.zarr not found');
     expect(rawLayerIds()).toContain('picked-point@draped');
 

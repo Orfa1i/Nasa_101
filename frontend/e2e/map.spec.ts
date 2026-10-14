@@ -267,12 +267,21 @@ test.describe('map viewer', () => {
 
     const pixelReq = page.waitForResponse((r) => r.url().includes('/pixel?') && r.ok());
     await page.mouse.click(p.x, p.y);
-    await pixelReq;
+    const res = await pixelReq;
+    // The request carries the clicked coordinate (within one 30 m cell of the cell centre).
+    const q = new URL(res.url()).searchParams;
+    expect(Math.abs(Number(q.get('lon')) - lon)).toBeLessThan(0.0003);
+    expect(Math.abs(Number(q.get('lat')) - lat)).toBeLessThan(0.0003);
     const panel = page.getByTestId('pixel-panel');
+    await expect(panel.getByTestId('pixel-coords')).toHaveText(`${Number(q.get('lat')).toFixed(5)}, ${Number(q.get('lon')).toFixed(5)}`);
     await expect(panel.getByTestId('pixel-regime')).toContainText('4 · regime4-active-instability');
-    await expect(panel.getByTestId('pixel-rmse')).toContainText(/\d\.\d{4}/);
-    await expect(panel.getByTestId('pixel-coherence')).toContainText(/0\.\d\d/);
-    await expect(panel).toContainText('not failure forecasts');
+    await expect(panel).toContainText('not a failure forecast');
+    // ...and populated the inspector charts.
+    await expect(page.getByTestId('chart-spectrum')).toBeVisible();
+    await expect(page.getByTestId('pixel-rmse')).toContainText(/\d\.\d{4}/);
+    await page.getByTestId('tab-kinematics').click();
+    await expect(page.getByTestId('pixel-coherence')).toContainText(/0\.\d\d/);
+    await expect(page.getByTestId('chart-fukuzono')).toBeVisible();
     await expect.poll(async () => (await layerIds(page)).includes('picked-point')).toBe(true);
     await expect(quality).toBeVisible();
   });

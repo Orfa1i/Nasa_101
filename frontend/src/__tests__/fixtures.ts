@@ -4,7 +4,7 @@
  */
 import { vi } from 'vitest';
 
-import type { Alert, DataSource, Facility, LayerInfo, Matrix, PixelResponse } from '@/utils/api';
+import type { Alert, DashboardSummary, DataSource, Facility, FukuzonoFit, KinematicSeries, LayerInfo, Matrix, PixelResponse, Spectrum } from '@/utils/api';
 
 export const SIERRITA_BBOX: [number, number, number, number] = [-111.12, 31.83, -111.04, 31.9];
 
@@ -80,14 +80,72 @@ export function layerInfo(available: string[]): LayerInfo[] {
   }));
 }
 
+/** 285 EMIT-like band centres (381-2493 nm); the water-vapour windows are inactive (40 channels). */
+export const WAVELENGTHS = Array.from({ length: 285 }, (_, i) => 381 + i * ((2493 - 381) / 284));
+export const ACTIVE = WAVELENGTHS.map((w) => !((w >= 1340 && w <= 1460) || (w >= 1790 && w <= 1970)));
+
+export const SPECTRUM: Spectrum = {
+  match: { method: 'nearest', nearest_cell_distance_m: 21, note: 'spectrum, fit and fractions of the nearest cell' },
+  wavelengths_nm: WAVELENGTHS,
+  reflectance: WAVELENGTHS.map((w) => 0.3 + 0.1 * Math.sin(w / 300)),
+  active: ACTIVE,
+  modelled: WAVELENGTHS.map((w, i) => (ACTIVE[i] ? 0.3 + 0.1 * Math.sin(w / 300) + 0.002 : null)),
+  excluded_windows_nm: [[1340, 1460], [1790, 1970]],
+  abundance: { Jarosite: 0.6, Goethite: 0.05, Ferrihydrite: 0, Montmorillonite: 0.25, Gypsum: 0.02, 'Quartz-Feldspar': 0.06, 'Water-Shade': 0.02 },
+  rmse: 0.0123,
+  sai: 0.47,
+  endmember_titles: { Jarosite: 'Jarosite GDS99 K 200C Syn W1R1Ba AREF' },
+};
+
+export const K_TIMES = ['2024-01-01T00:00:00', '2024-01-13T00:00:00', '2024-01-25T00:00:00', '2024-02-06T00:00:00', '2024-02-18T00:00:00', '2024-03-01T00:00:00', '2024-03-13T00:00:00'];
+
+export const FIT: FukuzonoFit = {
+  window_times: K_TIMES.slice(2),
+  inverse_velocity_yr_mm: [0.05, 0.04, 0.03, 0.02, 0.01],
+  inverse_velocity_lower_yr_mm: [0.045, 0.035, 0.025, 0.015, 0.006],
+  inverse_velocity_upper_yr_mm: [0.055, 0.045, 0.035, 0.025, 0.014],
+  t0: K_TIMES[6],
+  lambda_0_yr_mm: 0.01,
+  slope_yr_mm_per_yr: -0.3,
+  slope_std: 0.02,
+  slope_significant: true,
+  line_times: ['2024-01-25T00:00:00', '2024-03-13T00:00:00', '2024-03-25T00:00:00', '2024-04-06T00:00:00'],
+  line_yr_mm: [0.05, 0.01, 0.0, -0.01],
+  line_lower_yr_mm: [0.046, 0.007, -0.004, -0.016],
+  line_upper_yr_mm: [0.054, 0.013, 0.004, -0.004],
+  crossing_estimate: '2024-03-25T00:00:00',
+  crossing_lower: '2024-03-20T00:00:00',
+  crossing_upper: '2024-04-01T00:00:00',
+  label: 'Estimated change in velocity trend (inverse-velocity extrapolation), not a guaranteed failure date',
+};
+
+export const KINEMATICS: KinematicSeries = {
+  source: REAL_DISP, match: { method: 'bilinear', nearest_cell_distance_m: 10, note: 'series: bilinear between the 4 nearest cells; status and timeline: nearest cell' },
+  times: K_TIMES,
+  displacement_mm: [0, -1, -2.5, -4.5, -7.5, -12, -20],
+  displacement_smooth_mm: [0, -1.1, -2.4, -4.6, -7.4, -12.1, -19.8],
+  displacement_smooth_lower_mm: [-0.5, -1.6, -2.9, -5.1, -7.9, -12.6, -20.6],
+  displacement_smooth_upper_mm: [0.5, -0.6, -1.9, -4.1, -6.9, -11.6, -19.0],
+  velocity_mm_yr: [-25, -30, -40, -55, -80, -120, -200],
+  velocity_lower_mm_yr: [-30, -35, -45, -60, -85, -128, -215],
+  velocity_upper_mm_yr: [-20, -25, -35, -50, -75, -112, -185],
+  acceleration_mm_yr2: [-50, -100, -200, -400, -800, -1500, -2600],
+  acceleration_lower_mm_yr2: [-150, -200, -300, -500, -900, -1700, -3000],
+  acceleration_upper_mm_yr2: [50, 0, -100, -300, -700, -1300, -2200],
+  inverse_velocity_yr_mm: [0.04, 0.033, 0.05, 0.04, 0.03, 0.02, 0.01],
+  temporal_coherence: 0.91, coherence_threshold: 0.65, status: 'accelerating-forecast',
+  instability_time: '2024-03-25T00:00:00', instability_time_lower: '2024-03-20T00:00:00', instability_time_upper: '2024-04-01T00:00:00',
+  disclaimer: 'Trend instability timelines are statistical extrapolations ... NOT a guaranteed or predicted collapse or failure date.',
+  fukuzono: FIT,
+};
+
 export const PIXEL: PixelResponse = {
   facility_id: 'sierrita', lat: 31.89, lon: -111.11, utm_x: 0, utm_y: 0, utm_crs: 'EPSG:32612',
-  kinematics: {
-    source: REAL_DISP, match: { method: 'bilinear', nearest_cell_distance_m: 10, note: null }, times: DISP_TIMES,
-    displacement_mm: [-1, -2, -3], temporal_coherence: 0.91, status: 'accelerating-forecast',
-    instability_time: '2025-01-08T00:00:00', instability_time_lower: '2024-12-29T00:00:00', instability_time_upper: '2025-01-19T00:00:00', disclaimer: 'not a forecast',
+  kinematics: KINEMATICS,
+  spectral: {
+    source: SYNTH, match: { method: 'bilinear', nearest_cell_distance_m: 10, note: null }, sai: 0.48, rmse: 0.0123, ndvi: 0.1, confidence: 0.9,
+    observability: 'observable', abundance: { Jarosite: 0.58, Montmorillonite: 0.24 }, spectrum: SPECTRUM, spectrum_unavailable: null,
   },
-  spectral: { source: SYNTH, match: { method: 'bilinear', nearest_cell_distance_m: 10, note: null }, sai: 0.48, rmse: 0.0123, ndvi: 0.1, confidence: 0.9, observability: 'observable', abundance: {} },
   hydrology: null,
   classification: {
     source: SYNTH, match: { method: 'nearest', nearest_cell_distance_m: 10, note: null }, regime: 4, regime_meaning: 'regime4-active-instability-tier3-critical',
@@ -97,9 +155,36 @@ export const PIXEL: PixelResponse = {
   unavailable: { hydrology: 'Sierrita_hydrology.zarr not found' },
 };
 
+export const DASHBOARD: DashboardSummary = {
+  facility_id: 'sierrita',
+  risk_classification: 'Tier-3 / Active Instability',
+  hydrological_setback: {
+    facility_id: 'sierrita', available: true, crest_line: 'crest.geojson',
+    thresholds: { shrink_alert_m: -30, proximity_alert_m: 15 }, n_epochs: 3, n_valid_epochs: 3,
+    latest_valid: { date: '2024-05-05', d_crest_m: 12, status: 'valid', delta_vs_baseline_m: -138, delta_vs_previous_m: -78, alerts: ['shrink_vs_baseline', 'shrink_vs_previous', 'crest_proximity'], observed_fraction_pct: 100, water_area_m2: 2e5 },
+    min_valid_d_crest_m: 12, encroaching: true,
+    series: [
+      { date: '2024-01-05', d_crest_m: 150, status: 'valid', delta_vs_baseline_m: 0, delta_vs_previous_m: null, alerts: [], observed_fraction_pct: 100, water_area_m2: 72000 },
+      { date: '2024-03-05', d_crest_m: 90, status: 'valid', delta_vs_baseline_m: -60, delta_vs_previous_m: -60, alerts: ['shrink_vs_baseline', 'shrink_vs_previous'], observed_fraction_pct: 100, water_area_m2: 108000 },
+      { date: '2024-05-05', d_crest_m: 12, status: 'valid', delta_vs_baseline_m: -138, delta_vs_previous_m: -78, alerts: ['shrink_vs_baseline', 'shrink_vs_previous', 'crest_proximity'], observed_fraction_pct: 100, water_area_m2: 2e5 },
+    ],
+  },
+  consistency_checks: [],
+  all_checks_passed: true,
+  gistm_screening: {
+    candidate_issues: [{ gistm_principle: 'Principle 6: plan, build and operate the facility to manage risk', issue: 'The pond-to-crest setback triggered a shrink or proximity alert.', evidence_paths: ['get_hydrological_setback:latest_valid'] }],
+    recommendations: [],
+    data_limitations: [],
+  },
+};
+
 export interface StubOptions {
   facilitiesStatus?: number;
   available?: Record<string, string[]>;
+  pixel?: PixelResponse;
+  /** answer /pixel with the API's 404 "no data at this point" body */
+  pixelUnavailable?: Record<string, string>;
+  dashboard?: DashboardSummary | { status: number; detail: string };
 }
 
 /** Install a fetch stub serving the fixtures; returns the mock (inspect `.mock.calls`). */
@@ -120,7 +205,13 @@ export function stubFetch(opts: StubOptions = {}) {
       if (!(available[id] ?? []).includes(layer) || !MATRICES[layer]) return json({ detail: `${layer} not found` }, 404);
       return json(MATRICES[layer](url.searchParams.get('t')));
     }
-    if (sub === 'pixel') return json({ ...PIXEL, lat: Number(url.searchParams.get('lat')), lon: Number(url.searchParams.get('lon')) });
+    if (sub === 'pixel' && opts.pixelUnavailable)
+      return json({ detail: { message: `No data for ${id} at this point`, unavailable: opts.pixelUnavailable } }, 404);
+    if (sub === 'pixel') return json({ ...(opts.pixel ?? PIXEL), lat: Number(url.searchParams.get('lat')), lon: Number(url.searchParams.get('lon')) });
+    if (sub === 'dashboard') {
+      const d = opts.dashboard ?? DASHBOARD;
+      return 'status' in d ? json({ detail: d.detail }, d.status) : json(d);
+    }
     return json({ detail: 'not found' }, 404);
   });
   vi.stubGlobal('fetch', fn);

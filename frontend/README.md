@@ -1,8 +1,8 @@
 # LithoCreep frontend
 
-Next.js (pages router) + TypeScript + Tailwind CSS map viewer for the LithoCreep screening API.
-deck.gl renders 3D terrain, facility footprints and the backend's raster matrices over a
-Mapbox GL basemap (with a token) or MapLibre GL (without).
+Next.js (pages router) + TypeScript + Tailwind CSS map viewer and inspector for the LithoCreep
+screening API. deck.gl renders 3D terrain, facility footprints and the backend's raster matrices over a
+Mapbox GL basemap (with a token) or MapLibre GL (without); Recharts draws the inspector panels.
 
 ## Run
 
@@ -39,7 +39,8 @@ set `PW_CHROMIUM_PATH` to use a pre-installed Chromium.
 |------|---------|
 | `src/components/MapViewer.tsx` | deck.gl map: TerrainLayer, facility GeoJsonLayer, matrix BitmapLayers, camera fly-to, picking |
 | `src/components/MapHud.tsx` | Provenance watermark, data-quality panel (RMSE / coherence), legend |
-| `src/components/Sidebar.tsx` | Facility picker, overlay toggles, OPERA epoch timeline, selected-cell panel |
+| `src/components/Sidebar.tsx` | Facility picker, overlay toggles, OPERA epoch timeline, Double Inspector |
+| `src/components/Inspector.tsx` | Double Inspector (Recharts): coordinate picker; spectroscopy, kinematics (GP bands, Fukuzono trend) and hydrology (D_crest, GISTM checks) panels |
 | `src/components/Basemap.tsx` | Mapbox GL / MapLibre GL basemap (code-split) |
 | `src/hooks/useDashboard.ts` | Dashboard state and API loading |
 | `src/utils/` | API client and types, colour scales, matrix rendering and masks, layer construction, provenance |
