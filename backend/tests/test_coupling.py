@@ -401,11 +401,13 @@ def test_cli_couple_reports_missing_inputs(cli_settings):
 CHAIN_BBOX = (-111.127, 31.896, -111.117, 31.906)
 
 
-def build_full_chain(tmp_path, *, facility="Test", bbox=CHAIN_BBOX, settings=None):
+def build_full_chain(tmp_path, *, facility="Test", bbox=CHAIN_BBOX, settings=None, vegetated=None, decorrelated=None):
     """Run the real Phase 4, 2 and 3 pipelines on a ~1 km synthetic site, then Phase 5.
 
     The site has a pond at the top, a moving (accelerating) block mid-slope and a
     seepage toe; returns the settings, the coupling summary and the geometry helpers.
+    ``vegetated`` / ``decorrelated`` are optional ``(X, Y) -> bool`` UTM regions that get a
+    vegetation spectrum (NDVI > 0.35) or a DISP-S1 coherence of 0.4.
     """
     from app.config import Settings
     from tests.test_hydrology import dswx_name, write_wtr
@@ -452,7 +454,8 @@ def build_full_chain(tmp_path, *, facility="Test", bbox=CHAIN_BBOX, settings=Non
     f[names.index("Montmorillonite")] = np.where(seep, 0.3, 0.0)
     f[names.index("Quartz-Feldspar")] = np.where(seep, 0.1, 0.9)
     f[names.index("Water-Shade")] = np.where(seep, 0.0, 0.1)
-    cube = make_cube(M_full, wl, f, x0=x0, y0=y0, res=60.0)
+    veg_cells = list(zip(*np.nonzero(vegetated(X60, Y60)))) if vegetated else ()
+    cube = make_cube(M_full, wl, f, x0=x0, y0=y0, res=60.0, vegetated=veg_cells)
     spectral_out = settings.cache_dir / f"{facility}_spectral.zarr"
     unmixing.run_spectral_pipeline(write_input_zarr(cube, tmp_path / "rfl.zarr"), spectral_out, settings=settings)
 
@@ -469,9 +472,10 @@ def build_full_chain(tmp_path, *, facility="Test", bbox=CHAIN_BBOX, settings=Non
     accel_mm = (1 / 0.03) * (np.log(tf - ty) - np.log(tf))
     rng = np.random.default_rng(0)
     moving = block(DX, DY)
+    coherence = np.where(decorrelated(DX, DY), 0.4, 0.9) if decorrelated else np.full(shape, 0.9)
     for i in range(1, times.size):
         d = rng.normal(0, 0.3, shape) / 1000.0 + np.where(moving, accel_mm[i] / 1000.0, 0.0)
-        write_disp(stack / disp_name(times[0].strftime("%Y%m%d"), times[i].strftime("%Y%m%d")), d, np.full(shape, 0.9), origin=origin)
+        write_disp(stack / disp_name(times[0].strftime("%Y%m%d"), times[i].strftime("%Y%m%d")), d, coherence, origin=origin)
     kin_out = settings.cache_dir / f"{facility}_kinematics.zarr"
     kin.run_kinematics(facility, bbox, kin_out, settings=settings, stack_paths=sorted(stack.glob("*.nc")), hyperparameters="hybrid")
 

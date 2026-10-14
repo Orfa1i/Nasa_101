@@ -75,7 +75,19 @@ LAYERS: dict[str, LayerSpec] = {
     "stream_network": LayerSpec("boolean", True, False, (("hydrology", "stream_network"),)),
     "water_class": LayerSpec("DSWx WTR class", True, True, (("hydrology", "water_class"),)),
     "hydraulic_distance": LayerSpec("m", False, True, (("hydrology", "water_class"),), derived="distance_to_water"),
+    "observability_mask": LayerSpec(
+        "mask code",
+        True,
+        False,
+        (("coupled", "classification_flags"), ("spectral", "observability"), ("kinematics", "kinematic_status")),
+        derived="observability_mask",
+    ),
 }
+
+# observability_mask codes; null = no data. Built from the coupled flags, else from whichever
+# single product exists (then only that product's half of the mask is known).
+MASK_OBSERVABLE, MASK_VEGETATED, MASK_DECORRELATED, MASK_BOTH = 0, 1, 2, 3
+MASK_MEANINGS = "observable unobservable-vegetated unobservable-low-coherence vegetated-and-low-coherence"
 
 
 @dataclass
@@ -133,6 +145,10 @@ def describe_source(product: str, path: Path, variable: str, ds: xr.Dataset) -> 
     else:
         synthetic = False
         label = f"GLO-30 DEM; DSWx: {attrs.get('dswx_source', 'none')}"
+    if int(attrs.get("synthetic_or_mock", 0) or 0):
+        # Explicit stamp (e.g. scripts/build_demo_cache.py) wins over filename-based provenance.
+        synthetic = True
+        label = f"SYNTHETIC: {attrs.get('synthetic_note') or label}"
     return Source(product, path.name, variable, synthetic, label)
 
 
@@ -202,6 +218,33 @@ def distance_to_water(water_class: xr.DataArray) -> xr.DataArray:
     else:
         dist = np.full(water.shape, np.nan)
     return water_class.copy(data=dist.astype(np.float64))
+
+
+def observability_mask(da: xr.DataArray, variable: str) -> tuple[xr.DataArray, Optional[str]]:
+    """Mask codes (see ``MASK_MEANINGS``) where spectra are vegetated (NDVI > 0.35) or radar is decorrelated."""
+    from app.pipelines import coupling as cp
+    from app.pipelines import kinematics as kin
+    from app.pipelines import unmixing as um
+
+    v = da.values
+    finite = np.isfinite(v.astype(np.float64))
+    flags = np.where(finite, v, 0).astype(np.int64)
+    note = None
+    if variable == "classification_flags":
+        vegetated = (flags & cp.FLAG_VEGETATED) != 0
+        decorrelated = (flags & cp.FLAG_LOW_COHERENCE) != 0
+        no_data = (flags & (cp.FLAG_NO_SPECTRAL | cp.FLAG_NO_KINEMATICS)) == (cp.FLAG_NO_SPECTRAL | cp.FLAG_NO_KINEMATICS)
+    elif variable == "observability":
+        vegetated, decorrelated, no_data = flags == um.VEGETATED, np.zeros_like(finite), flags == um.NO_DATA
+        note = "spectral product only: radar decorrelation unknown"
+    elif variable == "kinematic_status":
+        vegetated, decorrelated, no_data = np.zeros_like(finite), flags == kin.UNOBSERVABLE, flags == kin.NO_DATA
+        note = "kinematic product only: vegetation unknown"
+    else:
+        raise ValueError(f"no observability mask for variable {variable!r}")
+    codes = vegetated * MASK_VEGETATED + decorrelated * MASK_DECORRELATED
+    out = np.where(finite & ~no_data, codes, np.nan)
+    return da.copy(data=out.astype(np.float64)), note
 
 
 def geographic_matrix(da: xr.DataArray, bbox: Sequence[float], *, categorical: bool, circular: bool = False) -> tuple[np.ndarray, list[float]]:

@@ -32,12 +32,28 @@ SITE = (-111.11, 31.86, -111.10, 31.87)  # inside the Sierrita bbox
 TO_LONLAT = Transformer.from_crs("EPSG:32612", "EPSG:4326", always_xy=True)
 REQUIRED = {"sierrita", "mission", "bingham", "brumadinho"}
 
+def _site_grid():
+    from app.pipelines.hydrology import utm_grid_bounds
+
+    return utm_grid_bounds(SITE, "EPSG:32612")
+
+
+# Patches east of the moving block, clear of the pond, block and toe.
+def VEGETATED(X, Y):
+    gx0, _, _, gy1 = _site_grid()
+    return (X > gx0 + 720) & (X < gx0 + 900) & (Y < gy1 - 360) & (Y > gy1 - 480)
+
+
+def DECORRELATED(X, Y):
+    gx0, _, _, gy1 = _site_grid()
+    return (X > gx0 + 720) & (X < gx0 + 900) & (Y < gy1 - 600) & (Y > gy1 - 720)
+
 
 @pytest.fixture(scope="module")
 def chain(tmp_path_factory):
     root = tmp_path_factory.mktemp("api")
     settings = Settings(DATA_DIR=str(root / "data"))
-    return build_full_chain(root, facility="Sierrita", bbox=SITE, settings=settings)
+    return build_full_chain(root, facility="Sierrita", bbox=SITE, settings=settings, vegetated=VEGETATED, decorrelated=DECORRELATED)
 
 
 @pytest.fixture(scope="module")
@@ -155,6 +171,37 @@ def test_hydraulic_distance_layer(chain, client):
     assert matrix_value(m, pond_lon, pond_lat) == pytest.approx(0.0, abs=1e-6)
     assert 350 < matrix_value(m, lon, lat) < 600  # block ~450-500 m below the shoreline
     assert "not a flow-path distance" in m.note
+
+
+def test_observability_mask_layer(chain, client):
+    m = Matrix.model_validate(client.get("/api/facilities/sierrita/matrices", params={"layer": "observability_mask"}).json())
+    assert m.categorical and m.flag_meanings.split()[1:3] == ["unobservable-vegetated", "unobservable-low-coherence"]
+    assert m.source.variable == "classification_flags"
+    gx0, _, _, gy1 = _site_grid()
+    veg = TO_LONLAT.transform(gx0 + 810, gy1 - 420)
+    dec = TO_LONLAT.transform(gx0 + 810, gy1 - 660)
+    _, _, lon, lat = block_cell(chain)
+    assert matrix_value(m, *veg) == 1
+    assert matrix_value(m, *dec) == 2
+    assert matrix_value(m, lon, lat) == 0
+    assert matrix_value(m, -111.05, 31.84) is None
+    # The masks agree with the pipeline layers they summarise.
+    coh = Matrix.model_validate(client.get("/api/facilities/sierrita/matrices", params={"layer": "coherence"}).json())
+    assert matrix_value(coh, *dec) < 0.65 < matrix_value(coh, lon, lat)
+    regime = Matrix.model_validate(client.get("/api/facilities/sierrita/matrices", params={"layer": "anomaly_regime"}).json())
+    assert matrix_value(regime, *dec) == 2
+
+
+def test_explicit_synthetic_stamp_overrides_filename_provenance(tmp_path):
+    from app.api import layers as L
+
+    ds = xr.Dataset(attrs={"source": "OPERA_L3_DISP-S1_V1"})
+    assert not L.describe_source("kinematics", tmp_path / "X_kinematics.zarr", "velocity", ds).synthetic_or_mock
+    ds.attrs.update(synthetic_or_mock=1, synthetic_note="demo site")
+    src = L.describe_source("kinematics", tmp_path / "X_kinematics.zarr", "velocity", ds)
+    assert src.synthetic_or_mock and src.label == "SYNTHETIC: demo site"
+    for product in ("hydrology", "spectral", "coupled"):
+        assert L.describe_source(product, tmp_path / "x.zarr", "v", ds).synthetic_or_mock
 
 
 def test_matrix_errors(client):

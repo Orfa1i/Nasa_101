@@ -167,8 +167,11 @@ def facility_matrix(
         da = resolved.data
         times = L.layer_times(da)
         da, epoch = L.select_time(da, t)
+        mask_note = None
         if spec.derived == "distance_to_water":
             da = L.distance_to_water(da)
+        elif spec.derived == "observability_mask":
+            da, mask_note = L.observability_mask(da, resolved.source.variable)
         values, res = L.geographic_matrix(da, bbox_of(row), categorical=spec.categorical, circular=spec.circular)
     except (L.AssetMissing, L.AssetUnreadable) as exc:
         raise _http_from(exc) from exc
@@ -176,12 +179,14 @@ def facility_matrix(
         logger.exception("Matrix %s/%s failed", facility_id, name)
         raise HTTPException(status_code=503, detail=f"Cached product unreadable: {type(exc).__name__}: {exc}") from exc
 
-    notes = [n for n in (resolved.note,) if n]
+    notes = [n for n in (resolved.note, mask_note) if n]
     if spec.derived == "distance_to_water":
         notes.append("Euclidean distance to the nearest DSWx water cell (WTR 1/2), not a flow-path distance")
     if t is not None and not spec.time_dependent:
         notes.append("layer is static; t ignored")
     flag_meanings = resolved.data.attrs.get("flag_meanings") if spec.categorical else None
+    if spec.derived == "observability_mask":
+        flag_meanings = L.MASK_MEANINGS
     return Matrix(
         facility_id=facility_id,
         layer=name,

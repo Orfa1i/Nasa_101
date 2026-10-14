@@ -11,7 +11,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 5 | Co-anomaly coupling and regime classifier | **Done**: tests pass, including a full Phase 2→5 chain. No real classification exists yet (no real EMIT, DISP-S1 or DSWx data) |
 | 6 | API and database | **Done**: tests pass, unmocked; serves real GLO-30 terrain for Sierrita. The other layers wait on real EMIT, DISP-S1 and DSWx inputs |
 | 7 | Audit copilot | **Done**: tests pass, including the Claude tool-use loop against a scripted client. No live Claude call has been made (no API credentials in this sandbox), and every brief so far was built from synthetic test products |
-| 8 | Next.js / deck.gl map | Not started |
+| 8 | Next.js / deck.gl map | **Done**: unit, component and browser tests pass against the real backend (serving the synthetic demo site), with real WebGL rendering in headless Chromium. No Mapbox token was available, so only the open MapLibre / Terrarium path has run, and with locally served stand-in tiles |
 | 9 | Inspector panels | Not started |
 | 10 | Scenarios, backtest UI, CI | Not started |
 
@@ -739,3 +739,132 @@ $ pytest tests/test_agent.py
 * **No real-data brief.** Every product the agent reads is still synthetic or partial (see Phases 2–6), so no real facility brief exists.
 * **The prose check is lexical.** It confirms that every number and date in the prose exists in the tool outputs, but not that it is attached to the right quantity in the sentence. Structured facts and windows are checked exactly against their cited paths.
 * **Cost and latency are unmeasured.** A Claude audit makes at least two requests (tool calls, then the brief), with tool outputs of a few kB each.
+
+---
+
+## Phase 8: Next.js / deck.gl map viewer
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `frontend/src/components/MapViewer.tsx` | The 3D deck.gl map (detail under *Map*). |
+| `frontend/src/components/MapHud.tsx` | The provenance watermark, the data-quality panel (unmixing RMSE and radar coherence) and a collapsible legend. |
+| `frontend/src/components/Sidebar.tsx` | The facility picker, overlay toggles, OPERA epoch timeline and selected-cell panel. |
+| `frontend/src/components/Basemap.tsx` | Mapbox GL basemap with a token, MapLibre GL without. Each is code-split, so only one is downloaded. |
+| `frontend/src/hooks/useDashboard.ts` | Dashboard state. Loads facilities and alerts, layer listings, matrices, the mask and pixels from the API. |
+| `frontend/src/utils/*.ts` | Typed API client, colour ramps, matrix-to-RGBA rendering with masks, deck.gl layer construction, facility GeoJSON, provenance and epochs. |
+| `frontend/src/pages/{_app,index}.tsx`, `styles/globals.css` | Responsive page layout (Tailwind). |
+| `frontend/{package.json, package-lock.json, tsconfig.json, next.config.js, tailwind.config.js, postcss.config.js, .eslintrc.json, .env.example, README.md}` | Project set-up. |
+| `frontend/src/__tests__/*` | 30 Vitest tests: units, plus components with API fixtures. |
+| `frontend/e2e/*`, `playwright.config.ts` | 15 Playwright tests against the real backend and the production build. |
+| `backend/app/api/layers.py`, `endpoints.py` | New `observability_mask` matrix layer. A product stamped `synthetic_or_mock` is reported as synthetic. |
+| `backend/scripts/build_demo_cache.py` | Builds and stamps the SYNTHETIC demo `DATA_DIR`. |
+| `backend/tests/test_coupling.py`, `test_api.py` | `build_full_chain` gains optional `vegetated` / `decorrelated` regions; 2 new API tests. |
+
+**Pins** (exact versions, all published at least two weeks before install; transitive dependencies resolved with `npm install --before=2026-09-29`):
+
+| Group | Packages |
+|-------|----------|
+| Framework | `next` 14.2.35, `react` / `react-dom` 18.3.1 |
+| deck.gl | `@deck.gl/*` 9.1.15, `@loaders.gl/terrain` 4.5.2 |
+| Basemaps | `react-map-gl` 8.0.4, `maplibre-gl` 5.9.0, `mapbox-gl` 3.15.0 |
+| Build and types | `tailwindcss` 3.4.19, `typescript` 5.6.3 |
+| Testing | `vitest` 2.1.9, `@playwright/test` 1.56.1 (matches the pre-installed Chromium) |
+
+The playbook layout (`src/pages`, `src/components`, `src/utils`, `tailwind.config.js`) is followed.
+
+### Behaviour
+
+* **Map.**
+  * **Terrain.** deck.gl `TerrainLayer` loads 3D topography.
+    * With `MAPBOX_ACCESS_TOKEN`: Mapbox terrain-RGB plus Mapbox satellite texture.
+    * Without a token: AWS Terrain Tiles (Terrarium) plus CARTO raster texture.
+    * Tiles are decoded on the main thread with `@loaders.gl/terrain`'s `TerrainLoader`. deck.gl's default terrain loader is worker-only and downloads its worker from a CDN.
+  * **Draping.** Every other layer is draped on the terrain with `_TerrainExtension`.
+  * **Terrain fallback.** If the terrain tiles fail (3 errors before any success), the map falls back to flat rendering and says so. Otherwise draped layers would simply vanish.
+  * **Camera.** Choosing a facility flies the camera to its bbox (`WebMercatorViewport.fitBounds`, pitched 50° with terrain, 0° without). Prefers-reduced-motion users get no animation.
+* **Facilities.** A `GeoJsonLayer` of registry bbox polygons, coloured by the latest alert:
+  * Green: `NONE`.
+  * Yellow: `WATCH_TIER1` / `ALERT_TIER2`.
+  * Red: `CRITICAL_TIER3`.
+  * **Grey: no classification yet.** Unclassified facilities are not shown green.
+  * Centre markers keep facilities visible at world zoom.
+  * Hovering shows a tooltip with country, commodity, embankment, status, alert, and whether the inputs were synthetic. Clicking a facility selects it.
+* **Matrices.** One `BitmapLayer` per active overlay, fetched from `/matrices`. Each sits on its exact bbox, with LNGLAT image coordinates and nearest-neighbour texture sampling (one texel per ~30 m cell).
+  * The toggleable overlays:
+
+    | Overlay | Colour scale |
+    |---------|--------------|
+    | SAI seepage | Yellow–red, threshold marked at 0.25 |
+    | InSAR cumulative displacement | Symmetric diverging scale |
+    | Flow paths | log-scaled flow accumulation, < 10 cells hidden |
+    | Anomaly regimes | Categorical |
+    | Unmixing RMSE (quality) | Threshold 0.05 |
+    | Radar coherence (quality) | Threshold 0.65 |
+  * **Masks.** The new `observability_mask` layer marks vegetated (NDVI > 0.35) and decorrelated (coherence < 0.65) cells, taken from the coupled classification flags. Those cells are **transparent** in the overlays they invalidate (vegetation: SAI; decorrelation: displacement) and drawn with a hatch. The mask can be toggled.
+  * **Timeline.** It merges the DISP-S1 and DSWx epochs. Time-dependent matrices request the selected epoch (the server uses the nearest one), and the legend shows the epoch actually served.
+* **Pixel inspection.** Clicking inside the selected facility loads `/pixel` into the sidebar:
+  * regime, trend-change date with 95 % bounds, SAI, RMSE, coherence, kinematic status and terrain;
+  * any product that is unavailable is listed.
+
+  On 3D terrain the clicked cell comes from the bitmap pick's UV coordinates, so it is correct in tilted views. Hovering shows each active matrix's value, plus the cursor's RMSE, coherence and mask class in the quality panel.
+* **Visual checks.**
+  * **Watermark.** "AUTHENTIC SATELLITE OBSERVATION" only when every shown matrix source *and* the facility alert come from real observations. Anything synthetic makes the view "SIMULATED DATASET", lists each source, and adds a faint full-map SIMULATED backdrop.
+  * **Quality panel.** Median and tail values of RMSE and coherence, the share of cells past each threshold, and masked-cell counts.
+* **Provenance fix (backend).** The demo's synthetic DISP-S1 and DSWx inputs reuse real OPERA file names, so the API labelled them genuine OPERA data. Products can now carry an explicit `synthetic_or_mock` stamp, which wins over file-name provenance. `build_demo_cache.py` stamps all of its products, so the watermark cannot call demo data authentic.
+* **Layout.**
+  * From `lg` (≥ 1024 px): the sidebar (22–24 rem) sits beside the map.
+  * Below that: the map is on top and the controls go in a collapsible bottom panel.
+  * The HUD rows wrap and shrink, and the legend collapses by default on phones.
+* **Failures.**
+  * Backend down: the sidebar shows an alert with a retry.
+  * Missing products: toggles are disabled ("n/a", with the reason on hover).
+  * Basemap or terrain unreachable: a notice is shown and overlays are still drawn.
+  * WebGL error: a notice is shown.
+
+### Verification
+
+```
+$ cd frontend && npm run typecheck && npm run lint && npm run build
+✔ No ESLint warnings or errors · ✓ Compiled successfully
+$ npm test
+30 passed
+$ E2E_PYTHON=... E2E_DATA_DIR=<demo dir> npm run test:e2e
+15 passed
+$ cd backend && pytest
+205 passed, 5 skipped
+```
+
+* **Vitest (jsdom).** `<DeckGL>` is replaced by a stub that records the real deck.gl layer objects the app builds. The tests cover:
+  * matrix orientation, colour mapping, fades and per-overlay masking;
+  * provenance verdicts and epoch merging;
+  * layer order, and switching, draping and terrain sources;
+  * camera framing;
+  * through the hook and components with API fixtures: the picker, layer toggles, unavailable layers, the timeline's `t=` requests, quality statistics, hover readout, click to `/pixel` to the sidebar, tooltips, and the backend-down retry.
+* **Playwright (real stack, offline).** These run against `next start` with the real FastAPI backend serving the stamped synthetic demo site. All external hosts are blocked, and terrain and texture tiles are served as generated PNGs. Rendering is real WebGL2 in headless Chromium via SwiftShader. They check:
+  * **Facilities and watermark:** facility colours, the hover tooltip, and the watermark states.
+  * **Camera:** fly-to centres on the Sierrita bbox, then re-centres on Bingham.
+  * **Draping:** with terrain loaded, the draped regime raster is visibly drawn and disappears when switched off.
+  * **Layer switching:** pixel-level differences in the screenshots; switching is reversible.
+  * **Legends and timeline:** legends follow the active layers, and the timeline requests and labels the first epoch.
+  * **Mask:** a decorrelated cell's pixels change when the mask is toggled.
+  * **Pixel inspection:** clicking a Regime-4 cell fills the sidebar with regime, RMSE and coherence.
+  * **Fallbacks:** the flat fallback when terrain tiles are unreachable, and the backend-outage message.
+* **Responsive.** Tested at 1920×1080, 1440×900, 1366×768, 1280×720, 1024×768, 768×1024 and 390×844. Each check confirms:
+  * no page overflow;
+  * sidebar and map inside the viewport without overlapping, with the expected arrangement for the breakpoint;
+  * no sideways clipping in the sidebar;
+  * watermark, quality panel, legend, attribution and the mobile toggle inside the map and not overlapping each other;
+  * no text below 10 px.
+
+  The phone controls panel is also checked to collapse to a full-screen map.
+
+### Known gaps
+
+* **No Mapbox run.** There is no token here, so the Mapbox GL basemap and Mapbox terrain-RGB / satellite path is untested. Only its URL and decoder configuration are unit-tested.
+* **No live third-party tiles.** CARTO and AWS Terrarium tiles were never fetched: the sandbox blocks them, and the tests serve stand-ins. Their URLs follow the providers' public templates.
+* **Synthetic demo data only.** The demo covers a ~1 km synthetic site, so it occupies a small part of the Sierrita bbox. Real layers still wait on real EMIT, DISP-S1 and DSWx inputs (Phases 2–6).
+* **Large JSON matrices.** Each overlay is a JSON matrix (~0.5 MB for Sierrita) rendered client-side. That is fine at facility scale; binary tiles would scale better.
+* **Main-thread terrain decoding.** Terrain tiles are decoded on the main thread to avoid the CDN worker. This costs some frame time while tiles load.
+* **Phases 9–10 not started.** Inspector charts, the audit UI and scenarios come in Phases 9–10. The sidebar's cell panel is a text summary for now.
