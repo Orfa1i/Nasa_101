@@ -26,3 +26,7 @@ numcodecs==0.12.1
 # GDAL stack used by rioxarray; affine 3.x deprecates the operators rasterio/rioxarray rely on.
 rasterio==1.4.4
 affine==2.4.0
+# Gaussian-process regression for the kinematics engine (Phase 3).
+scikit-learn==1.3.2
+joblib==1.3.2
+threadpoolctl==3.2.0

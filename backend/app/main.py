@@ -4,6 +4,7 @@ Usage (from the repository root or from ``backend/``)::
 
     python backend/app/main.py ingest --facility Sierrita --bbox -111.12 31.83 -111.04 31.90
     python backend/app/main.py unmix --facility Sierrita
+    python backend/app/main.py kinematics --facility Sierrita [--download]
 
 ``ingest`` runs ``download_and_crop`` for each requested product, writes the
 clipped rasters to ``DATA_DIR/processed/<facility>/``, records the run on the
@@ -13,6 +14,10 @@ facility's feature in ``DATA_DIR/global_tailings.geojson`` and logs to
 ``unmix`` runs the spectroscopy engine on the facility's EMIT L2A output from
 ``ingest`` and writes ``DATA_DIR/cache/<Facility>_spectral.zarr`` plus an
 RMSE/validation JSON log in ``DATA_DIR/logs/``.
+
+``kinematics`` analyses the DISP-S1 stack in ``DATA_DIR/raw/OPERA_L3_DISP-S1_V1``
+(or, outside CONUS, ``DATA_DIR/<facility>_historic.csv``) and writes
+``DATA_DIR/cache/<Facility>_kinematics.zarr``.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from shapely.geometry import box
 
 from app.config import Settings, get_settings
 from app.pipelines.ingestion import PRODUCTS, download_and_crop, validate_bbox
+from app.pipelines.kinematics import run_kinematics
 from app.pipelines.unmixing import find_l2bmin_for, run_spectral_pipeline
 
 logger = logging.getLogger("lithocreep")
@@ -113,6 +119,17 @@ def build_parser() -> argparse.ArgumentParser:
     unmix.add_argument("--l2bmin", type=Path, help="EMITL2BMIN NetCDF for validation; default: matching file in DATA_DIR/raw/EMITL2BMIN")
     unmix.add_argument("--library", type=Path, help="USGS library extract CSV; default: splib07 extract if present, else bundled splib06a")
     unmix.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+
+    kin = sub.add_parser("kinematics", help="GP velocity/acceleration and Fukuzono trend timelines from InSAR")
+    kin.add_argument("--facility", required=True, type=_facility_name, help="Facility name, e.g. Sierrita")
+    kin.add_argument("--bbox", nargs=4, type=float, metavar=("XMIN", "YMIN", "XMAX", "YMAX"), help="optional for known facilities")
+    kin.add_argument("--stack-dir", type=Path, help="Folder of DISP-S1 .nc granules; default DATA_DIR/raw/OPERA_L3_DISP-S1_V1")
+    kin.add_argument("--historic-csv", type=Path, help="Point history CSV for non-CONUS sites; default DATA_DIR/<facility>_historic.csv")
+    kin.add_argument("--download", action="store_true", help="Download the DISP-S1 stack from Earthdata first (CONUS only)")
+    kin.add_argument("--hyperparameters", choices=("auto", "per_pixel", "hybrid"), default="auto", help="GP fitting: per series, or hybrid (shared for quiet ground); auto picks by size")
+    kin.add_argument("--jobs", type=int, default=-1, help="Parallel GP fits (joblib; -1 = all cores)")
+    kin.add_argument("--output", type=Path, help="Output Zarr; default DATA_DIR/cache/<Facility>_kinematics.zarr")
+    kin.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser
 
 
@@ -279,6 +296,57 @@ def cmd_unmix(args: argparse.Namespace, settings: Settings) -> int:
             handler.close()
 
 
+def cmd_kinematics(args: argparse.Namespace, parser: argparse.ArgumentParser, settings: Settings) -> int:
+    from app.pipelines import ingestion
+
+    slug = facility_slug(args.facility)
+    known = KNOWN_FACILITIES.get(slug)
+    display = known["name"] if known else args.facility
+    if args.bbox is None:
+        if known is None:
+            parser.error(f"--bbox is required for unknown facility {args.facility!r}")
+        bbox = known["bbox"]
+    else:
+        try:
+            bbox = validate_bbox(args.bbox)
+        except ValueError as exc:
+            parser.error(f"invalid --bbox: {exc}")
+
+    run_id = f"{slug}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    handlers = configure_logging(settings.log_dir / f"kinematics_{run_id}.log", args.log_level)
+    try:
+        in_conus = ingestion.bbox_within_conus(bbox)
+        if args.download and in_conus:
+            try:
+                ingestion.download_disp_stack(bbox, settings)
+            except ingestion.OFFLINE_ERRORS as exc:
+                logger.warning("Earthdata unreachable (%s); using DISP-S1 granules already on disk", type(exc).__name__)
+        elif args.download:
+            logger.warning("%s is outside CONUS; DISP-S1 download skipped", display)
+
+        stack = None
+        if args.stack_dir is not None:
+            stack = sorted(Path(args.stack_dir).glob("OPERA_L3_DISP-S1_*.nc"))
+        output = args.output or settings.cache_dir / f"{display}_kinematics.zarr"
+        try:
+            summary = run_kinematics(
+                display, bbox, output, settings=settings, stack_paths=stack,
+                historic_csv=args.historic_csv, hyperparameters=args.hyperparameters, n_jobs=args.jobs,
+            )
+        except Exception as exc:
+            logger.error("Kinematics failed: %s: %s", type(exc).__name__, exc)
+            return 1
+        summary_path = settings.log_dir / f"{display}_kinematics_{run_id}.json"
+        summary_path.write_text(json.dumps(summary, indent=2, default=str))
+        logger.info("Summary: %s", summary_path)
+        logger.warning(summary["disclaimer"])
+        return 0
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -291,6 +359,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_ingest(args, parser, settings)
     if args.command == "unmix":
         return cmd_unmix(args, settings)
+    if args.command == "kinematics":
+        return cmd_kinematics(args, parser, settings)
     parser.error(f"unknown command {args.command!r}")
     return 2
 

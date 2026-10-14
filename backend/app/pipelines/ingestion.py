@@ -394,6 +394,38 @@ def download_assets(links: Sequence[str], raw_dir: Path, settings: Settings) -> 
     return [Path(p) for p in paths]
 
 
+def download_disp_stack(
+    bbox: Sequence[float],
+    settings: Settings,
+    temporal: tuple[str, str] = DEFAULT_TEMPORAL,
+    max_granules: int = MAX_GRANULES,
+) -> list[Path]:
+    """Download every DISP-S1 granule of the frame that best covers ``bbox`` (for the kinematics stack).
+
+    Raises ``CoverageError`` outside CONUS without querying CMR. Earthdata
+    connection errors propagate so the caller can fall back to local files.
+    """
+    spec = PRODUCTS["OPERA_L3_DISP-S1_V1"]
+    bbox = validate_bbox(bbox)
+    if not bbox_within_conus(bbox):
+        raise CoverageError(f"{spec.product_id} has no coverage outside CONUS/North America for bbox {bbox}")
+    granules = search_granules(spec, bbox, temporal, count=max_granules)
+    frames: dict[str, list[Any]] = {}
+    for granule in granules:
+        match = re.search(r"_F(\d{5})_", granule_id(granule))
+        if match:
+            frames.setdefault(match.group(1), []).append(granule)
+    if not frames:
+        return []
+    # Best frame: largest bbox coverage, then the longest stack.
+    frame, members = max(
+        frames.items(), key=lambda kv: (max(bbox_coverage(g, bbox) or 0.0 for g in kv[1]), len(kv[1]))
+    )
+    links = [select_asset_links(g, spec)[0] for g in members]
+    logger.info("Downloading %d DISP-S1 granules of frame F%s", len(links), frame)
+    return download_assets(links, settings.raw_dir / spec.short_name, settings)
+
+
 # --------------------------------------------------------------------------- #
 # Offline / cache fallbacks
 # --------------------------------------------------------------------------- #

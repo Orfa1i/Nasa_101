@@ -6,7 +6,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 |-------|-------|--------|
 | 1 | Environment, configuration, CLI, Earthdata download/crop pipeline | **Done**: tests pass; the live Earthdata path has not been run against NASA (see below) |
 | 2 | Spectroscopy / NNLS unmixing | **Done**: tests pass. 245 active channels, not 242 (see below); not yet run on a real EMIT or EMITL2BMIN granule |
-| 3 | Kinematics / InSAR trend modelling | Not started |
+| 3 | Kinematics / InSAR trend modelling | **Done**: tests pass. Timelines are biased late (see below); no real DISP-S1 stack or Brumadinho CSV has been run yet |
 | 4 | Hydrology / DSWx setback and flow routing | Not started |
 | 5 | Co-anomaly coupling and regime classifier | Not started |
 | 6 | API and database | Not started |
@@ -111,6 +111,7 @@ $ cd backend && pytest
 | `h5netcdf==1.3.0`, `h5py==3.10.0` | Needed to read EMIT and DISP-S1 NetCDF granules. |
 | `zarr==2.16.1`, `numcodecs==0.12.1` | Needed for the Zarr output format (newer numcodecs breaks zarr 2.16). |
 | `rasterio==1.4.4`, `affine==2.4.0` | Pin the GDAL stack. affine 3.x deprecates operators that rasterio and rioxarray use. |
+| `scikit-learn==1.3.2`, `joblib==1.3.2`, `threadpoolctl==3.2.0` | Added in Phase 3 for the GP regressor (era-consistent with scipy 1.11 / numpy 1.26). |
 
 ### Known gaps / follow-ups
 
@@ -201,4 +202,123 @@ $ cd backend && pytest
 * **Not run on real EMIT data.** Earthdata is blocked in this sandbox, so neither Sierrita EMIT granules nor EMITL2BMIN files could be fetched. No `Sierrita_spectral.zarr` or R² figures exist yet. Every result above is from synthetic cubes built from the real library spectra on the real EMIT grid.
   * `ingest` does not yet download EMITL2BMIN. Download the matching granule (same scene id) into `DATA_DIR/raw/EMITL2BMIN/`, or pass it with `--l2bmin`.
 * **No masks for cloud, cirrus or other conditions.** EMIT L2A `mask` files are not applied yet. Only vegetation (NDVI), no-data and poor-fit pixels are masked.
+
+---
+
+## Phase 3: Kinematic engine and InSAR trend modelling
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `backend/app/pipelines/kinematics.py` | Everything for the kinematics step:<br>• DISP-S1 stack loading and chaining, plus the historical CSV loader<br>• coherence gating<br>• GP smoothing with analytic velocity and acceleration<br>• Fukuzono inverse velocity and the Bayesian trend regression<br>• status classification and Zarr output |
+| `backend/app/pipelines/ingestion.py` | New `download_disp_stack()`: downloads every DISP-S1 granule of the frame that best covers the bbox. CONUS only; no query outside CONUS. |
+| `backend/app/main.py` | New CLI command `kinematics --facility NAME [--bbox] [--download] [--stack-dir] [--historic-csv] [--hyperparameters auto\|per_pixel\|hybrid] [--jobs N] [--output]`. |
+| `backend/requirements.txt` | Adds `scikit-learn==1.3.2`, `joblib==1.3.2`, `threadpoolctl==3.2.0`. |
+| `backend/tests/test_kinematics.py` | 18 tests. |
+
+### Engine behaviour
+
+* **DISP-S1 inputs (CONUS).**
+  * The layer names (`displacement` in metres, `temporal_coherence`), `spatial_ref` grid mapping and filename pattern were checked against OPERA's [`opera-adt/disp-s1`](https://github.com/opera-adt/disp-s1) product code (commit `10387d6`).
+  * Granules are deduplicated, keeping the newest production of each (reference, secondary) pair. They must belong to a single frame.
+  * Connectivity is checked from the filenames before any raster is read. A reference date that isn't an earlier epoch raises an error.
+  * Each granule is clipped and reprojected to UTM 32612 with the Phase 1 helpers. The granules are then chained into a single-reference series in mm: the running sum that OPERA's `scripts/align_to_common_reference_date.py` computes. Each ministack's reference date is a previous secondary date.
+* **Non-CONUS (e.g. Brumadinho).**
+  * No Earthdata search or download is made; the tests assert this.
+  * The series is read from `DATA_DIR/<facility>_historic.csv`, so `data/brumadinho_historic.csv` for Brumadinho.
+  * Columns: `date, displacement_mm[, point_id, temporal_coherence, longitude, latitude, source]`.
+  * A CSV without a coherence column is recorded as "assumed pre-filtered by source study".
+* **Coherence gate.**
+  * The per-pixel minimum `temporal_coherence` over the stack must be ≥ 0.65.
+  * Low or unknown coherence gives status `unobservable-low-coherence`, and the pixel is never passed to the GP or the forecast; a test checks that no fit is made for it.
+* **GP model.**
+  * scikit-learn `GaussianProcessRegressor`, kernel `C·Matern(ν=2.5) + C·DotProduct` (the linear trend) `+ WhiteKernel`.
+  * Fitted by maximum marginal likelihood on standardised displacement, with time in years and a length scale ≥ 0.1 yr.
+* **Velocity and acceleration.**
+  * Computed from **analytic derivatives** of the posterior for the latent function, which excludes the white noise; the outputs carry ±2σ bands. Matérn-5/2 is twice differentiable, so the acceleration variance is finite.
+  * A test checks the kernel derivatives against finite differences, and checks the posterior mean and variance and the velocity against scikit-learn's own predictions.
+* **Classification at the last epoch.**
+  * `stable` if |v| < 2 mm/yr; no predictive step is run.
+  * `moving-linear` if acceleration in the direction of motion is ≤ 2σ_a.
+  * Otherwise **accelerating**, and the forecast step runs.
+* **Fukuzono trend instability.**
+  * Λ = 1/|v| with σ_Λ = σ_v/v² (delta method).
+  * A Bayesian linear regression (Gaussian likelihood, flat prior) is fitted over the last 5 epochs: Λ = Λ₀ − (t − t₀)/A, with t₀ the last epoch.
+  * The posterior covariance is inflated by the reduced χ² when the scatter exceeds the GP errors.
+  * `t_instability = t₀ + AΛ₀`, with ±2σ from the delta method.
+  * If Λ is not decreasing, the status is `accelerating-no-converging-trend` and no date is produced.
+  * The `fukuzono_slope_significant` flag records whether the slope's 2σ band excludes zero.
+* **Disclaimer.** Every output and run summary includes: *"…indicate a potential change in deformation trend, NOT a guaranteed or predicted collapse or failure date…"*. The CLI also logs it as a warning.
+* **Hyperparameter modes.**
+  * `per_pixel` fits every series.
+  * `hybrid` (what `auto` picks above 500 observable series):
+    1. Quiet ground (OLS |v| < 1 mm/yr) and moving ground each share hyperparameters, fitted on a ≤ 64-series sample of their own kind.
+    2. Every series that could yield a forecast is then refitted alone and gets exactly the per-pixel result: shared-model |v| ≥ 2 mm/yr and acceleration beyond 1σ, or a moving series with a significant quadratic term (|t| > 2).
+  * Per-series fits run in parallel through joblib (`--jobs`).
+  * A synthetic 260 × 253 px stack (60 epochs) runs in about 30 s.
+  * **Why hybrid exists:** an earlier "shared" mode fitted one set of hyperparameters on random pixels and smoothed an accelerating block down to "stable". It was replaced.
+* **Output: `DATA_DIR/cache/<Facility>_kinematics.zarr`** (Blosc/zstd). Open it with `xr.open_zarr(path, decode_coords="all")`. Rasters have dims `(time, y, x)`; CSV points have `(time, point)`.
+  * Series: `displacement`, `displacement_smooth`, `velocity` (mm/yr), `acceleration` (mm/yr²) and `inverse_velocity` (yr/mm), each with `_lower` / `_upper` 95 % bounds.
+  * Per pixel: `temporal_coherence` and `kinematic_status` (CF flags).
+  * Fukuzono results: `fukuzono_lambda_0`, `_A`, `_slope`, `_slope_std` and `_slope_significant`.
+  * Timeline: `instability_time` with `_lower` / `_upper`, `instability_days_after_last_epoch`, and `instability_days_2sigma`.
+  * A JSON summary goes to `DATA_DIR/logs/`.
+
+### Verification
+
+```
+$ cd backend && pytest
+108 passed, 3 skipped
+```
+
+`test_kinematics.py` (18 passed) covers:
+
+* **GP maths:** kernel derivatives and the prior variances of f′ and f″; the posterior against scikit-learn.
+* **Stable series:** −1 mm/yr creep is `stable`; the band covers the truth; no Λ and no forecast.
+* **Linear creep:** −10 mm/yr creep is `moving-linear`; the velocity band covers the truth; acceleration is consistent with zero; no forecast.
+* **Accelerating series** (Fukuzono-generated) yield a timeline with A > 0, Λ₀ > 0 and decreasing Λ.
+* **Coherence gate:** low- and unknown-coherence series are never fitted and stay all-NaN.
+* **Short series:** too few epochs gives `no-data`.
+* **Hybrid mode:** matches per-pixel for every status and for the forecast-bearing series.
+* **Bayesian regression:** recovers a known line, and its covariance is inflated when the scatter exceeds the stated errors.
+* **DISP-S1 stack:** chaining across a reference-date change; newer production wins; mixed-frame and gap rejection; frame selection in `download_disp_stack`.
+* **Brumadinho-style backtest:** no Earthdata calls; `toe` gets a forecast, `crest` is stable, `decorrelated` is unobservable; bounds and disclaimer present.
+* **Missing CSV:** fails with a clear error.
+* **CLI raster run:** writes `Sierrita_kinematics.zarr` containing stable, forecast and unobservable pixels, and falls back offline.
+
+A fresh Python 3.11 virtualenv built from `requirements.txt` alone passes the full suite.
+
+### Detection limits and bias (measured, synthetic)
+
+**This is the most important caveat for anyone reading the outputs.** The scenarios were Fukuzono creep with true failure time t_f a set lead after the last epoch (120 epochs at 6-day spacing), Gaussian noise, and 3 seeds each.
+
+| Scenario | Velocity at last epoch | Result |
+|----------|------------------------|--------|
+| t_f 30 d after last epoch, A = 0.03, noise 0.5 mm | −406 mm/yr | Forecast 3/3. Estimates **62–75 d** (truth 30 d); ±2σ only ±14–20 d |
+| Same, noise 1 mm | −406 mm/yr | Forecast 3/3. Estimates 92–111 d, ±42–64 d |
+| Same, noise 2 mm | −406 mm/yr | **Not detected** (classed moving-linear) |
+| t_f 60 d, A = 0.03, noise 0.5 mm | −203 mm/yr | Estimates 136–157 d (truth 60 d) |
+| t_f 60 d, A = 0.03, noise 1 mm | −203 mm/yr | Forecast 2/3 |
+| t_f 120 d, A = 0.03, noise 0.5 mm | −101 mm/yr | Estimates 274–368 d (truth 120 d) |
+| t_f 120 d, A = 0.03, noise 1 mm | −101 mm/yr | Not detected |
+| A = 0.1 (gentler), any noise or lead tested | −30 to −122 mm/yr | **Never detected.** The last-epoch velocity is underestimated by about 40 % (e.g. −74 against −122 mm/yr), and its 95 % band does not cover the truth |
+
+**Cause.** A single stationary GP over the whole history picks a long length scale and lags the final acceleration. Velocities at the series end are biased low with overconfident bands, so timelines come out **late**, which is the unsafe direction, and their ±2σ intervals are too narrow.
+
+**What doesn't help.** Fitting the GP to a trailing 120- or 240-day window was tried; it mostly loses detection instead.
+
+**Possible improvements**, not implemented because they change the specified method: a non-stationary or change-point kernel; Fukuzono on raw, moving-window velocities; or calibrating the bands against known failures.
+
+Until something like that is done, treat a forecast as "accelerating trend present", and treat the date as a likely-late upper estimate.
+
+### Known gaps
+
+* **No real data has been run.**
+  * Earthdata is blocked in this sandbox, so no DISP-S1 stack exists for Sierrita.
+  * `data/brumadinho_historic.csv` is **not** included. The published Carlà et al. / Grebby et al. series could not be obtained here, and I did not want to fabricate it.
+  * The backtest test uses a clearly labelled synthetic CSV in the documented schema.
+  * Running the real backtest needs that CSV, with a `source` citation column.
+* **`recommended_mask` is not applied.** DISP-S1's `recommended_mask` (water, unwrapping components) and `short_wavelength_displacement` are not used yet. Only `temporal_coherence` gates pixels, as specified.
+* **Line-of-sight only.** Displacement is LOS, not decomposed into vertical and east components, and ascending and descending tracks are not combined.
 
