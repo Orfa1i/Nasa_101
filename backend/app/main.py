@@ -5,6 +5,7 @@ Usage (from the repository root or from ``backend/``)::
     python backend/app/main.py ingest --facility Sierrita --bbox -111.12 31.83 -111.04 31.90
     python backend/app/main.py unmix --facility Sierrita
     python backend/app/main.py kinematics --facility Sierrita [--download]
+    python backend/app/main.py hydrology --facility Sierrita [--download] [--crest crest.geojson]
 
 ``ingest`` runs ``download_and_crop`` for each requested product, writes the
 clipped rasters to ``DATA_DIR/processed/<facility>/``, records the run on the
@@ -18,6 +19,10 @@ RMSE/validation JSON log in ``DATA_DIR/logs/``.
 ``kinematics`` analyses the DISP-S1 stack in ``DATA_DIR/raw/OPERA_L3_DISP-S1_V1``
 (or, outside CONUS, ``DATA_DIR/<facility>_historic.csv``) and writes
 ``DATA_DIR/cache/<Facility>_kinematics.zarr``.
+
+``hydrology`` builds GLO-30 terrain/D-infinity routing products and, with
+DSWx-HLS granules and a crest line, the pond-to-crest setback series and alerts,
+writing ``DATA_DIR/cache/<Facility>_hydrology.zarr``.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ from shapely.geometry import box
 
 from app.config import Settings, get_settings
 from app.pipelines.ingestion import PRODUCTS, download_and_crop, validate_bbox
+from app.pipelines.hydrology import STREAM_THRESHOLD_CELLS, glo30_tile_names, run_hydrology
 from app.pipelines.kinematics import run_kinematics
 from app.pipelines.unmixing import find_l2bmin_for, run_spectral_pipeline
 
@@ -130,6 +136,20 @@ def build_parser() -> argparse.ArgumentParser:
     kin.add_argument("--jobs", type=int, default=-1, help="Parallel GP fits (joblib; -1 = all cores)")
     kin.add_argument("--output", type=Path, help="Output Zarr; default DATA_DIR/cache/<Facility>_kinematics.zarr")
     kin.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+
+    hyd = sub.add_parser("hydrology", help="DSWx pond setback alerts and GLO-30 D-infinity flow routing")
+    hyd.add_argument("--facility", required=True, type=_facility_name, help="Facility name, e.g. Sierrita")
+    hyd.add_argument("--bbox", nargs=4, type=float, metavar=("XMIN", "YMIN", "XMAX", "YMAX"), help="optional for known facilities")
+    hyd.add_argument("--download", action="store_true", help="Download GLO-30 tiles (HTTPS) and the DSWx-HLS series (Earthdata) first")
+    hyd.add_argument("--max-cloud", type=float, default=None, help="With --download: skip DSWx granules above this cloud cover (%%)")
+    hyd.add_argument("--dem", type=Path, nargs="+", help="DEM GeoTIFF(s); default GLO-30 tiles in DATA_DIR/raw/GLO30")
+    hyd.add_argument("--dswx-dir", type=Path, help="Folder of DSWx-HLS *_B01_WTR.tif; default DATA_DIR/raw/OPERA_L3_DSWX-HLS_V1")
+    hyd.add_argument("--crest", type=Path, help="Crest LineString vector file; default DATA_DIR/reference/<facility>_crest.geojson")
+    hyd.add_argument("--boundary", type=Path, help="Facility Polygon vector file; default DATA_DIR/reference/<facility>_boundary.geojson, else the bbox")
+    hyd.add_argument("--ndvi", type=Path, help="NDVI source (.zarr with 'ndvi' or raster); default DATA_DIR/cache/<Facility>_spectral.zarr")
+    hyd.add_argument("--stream-threshold", type=int, default=STREAM_THRESHOLD_CELLS, help="Cells of accumulation that define a stream")
+    hyd.add_argument("--output", type=Path, help="Output Zarr; default DATA_DIR/cache/<Facility>_hydrology.zarr")
+    hyd.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser
 
 
@@ -347,6 +367,70 @@ def cmd_kinematics(args: argparse.Namespace, parser: argparse.ArgumentParser, se
             handler.close()
 
 
+def _resolve_bbox(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[str, tuple[float, ...]]:
+    slug = facility_slug(args.facility)
+    known = KNOWN_FACILITIES.get(slug)
+    if args.bbox is None:
+        if known is None:
+            parser.error(f"--bbox is required for unknown facility {args.facility!r}")
+        return known["name"], tuple(known["bbox"])
+    try:
+        return (known["name"] if known else args.facility), validate_bbox(args.bbox)
+    except ValueError as exc:
+        parser.error(f"invalid --bbox: {exc}")
+        raise
+
+
+def cmd_hydrology(args: argparse.Namespace, parser: argparse.ArgumentParser, settings: Settings) -> int:
+    from app.pipelines import hydrology, ingestion
+
+    display, bbox = _resolve_bbox(args, parser)
+    slug = facility_slug(args.facility)
+    run_id = f"{slug}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    handlers = configure_logging(settings.log_dir / f"hydrology_{run_id}.log", args.log_level)
+    try:
+        dem_dir = settings.raw_dir / "GLO30"
+        dswx_dir = args.dswx_dir or settings.raw_dir / ingestion.PRODUCTS[hydrology.DSWX_DATASET_ID].short_name
+        if args.download:
+            try:
+                hydrology.download_glo30(bbox, dem_dir)
+            except Exception as exc:
+                logger.warning("GLO-30 download failed (%s: %s); using tiles already on disk", type(exc).__name__, exc)
+            try:
+                ingestion.download_granule_series(hydrology.DSWX_DATASET_ID, bbox, settings, max_cloud_cover=args.max_cloud)
+            except ingestion.OFFLINE_ERRORS as exc:
+                logger.warning("Earthdata unreachable (%s); using DSWx-HLS granules already on disk", type(exc).__name__)
+
+        dem_paths = args.dem or [p for p in (dem_dir / f"{n}.tif" for n in glo30_tile_names(bbox)) if p.exists()]
+        if not dem_paths:
+            logger.error("No DEM for %s: pass --dem or run with --download (GLO-30 tiles go to %s)", display, dem_dir)
+            return 1
+        dswx_paths = sorted(Path(dswx_dir).glob("*_B01_WTR.tif"))
+        reference = settings.data_path / "reference"
+        crest = args.crest or next((p for p in [reference / f"{slug}_crest.geojson"] if p.exists()), None)
+        boundary = args.boundary or next((p for p in [reference / f"{slug}_boundary.geojson"] if p.exists()), None)
+        ndvi = args.ndvi or settings.cache_dir / f"{display}_spectral.zarr"
+        output = args.output or settings.cache_dir / f"{display}_hydrology.zarr"
+        try:
+            summary = run_hydrology(
+                display, bbox, output, settings=settings, dem_paths=dem_paths, dswx_paths=dswx_paths,
+                crest_path=crest, boundary_path=boundary, ndvi_source=ndvi, stream_threshold=args.stream_threshold,
+            )
+        except Exception as exc:
+            logger.error("Hydrology failed: %s: %s", type(exc).__name__, exc)
+            return 1
+        summary_path = settings.log_dir / f"{display}_hydrology_{run_id}.json"
+        summary_path.write_text(json.dumps(summary, indent=2, default=str))
+        for alert in summary["alerts"]:
+            logger.warning("ALERT %s at %s (D_crest = %.1f m)", alert["alert"], alert["time"], alert["d_crest_m"])
+        logger.info("Summary: %s", summary_path)
+        return 0
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -361,6 +445,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_unmix(args, settings)
     if args.command == "kinematics":
         return cmd_kinematics(args, parser, settings)
+    if args.command == "hydrology":
+        return cmd_hydrology(args, parser, settings)
     parser.error(f"unknown command {args.command!r}")
     return 2
 

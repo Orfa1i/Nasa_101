@@ -7,7 +7,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 1 | Environment, configuration, CLI, Earthdata download/crop pipeline | **Done**: tests pass; the live Earthdata path has not been run against NASA (see below) |
 | 2 | Spectroscopy / NNLS unmixing | **Done**: tests pass. 245 active channels, not 242 (see below); not yet run on a real EMIT or EMITL2BMIN granule |
 | 3 | Kinematics / InSAR trend modelling | **Done**: tests pass. Timelines are biased late (see below); no real DISP-S1 stack or Brumadinho CSV has been run yet |
-| 4 | Hydrology / DSWx setback and flow routing | Not started |
+| 4 | Hydrology / DSWx setback and flow routing | **Done**: tests pass and terrain/routing ran on real GLO-30 for Sierrita. The setback series has not run on real DSWx, and no crest line exists yet |
 | 5 | Co-anomaly coupling and regime classifier | Not started |
 | 6 | API and database | Not started |
 | 7 | Audit copilot | Not started |
@@ -321,4 +321,103 @@ Until something like that is done, treat a forecast as "accelerating trend prese
   * Running the real backtest needs that CSV, with a `source` citation column.
 * **`recommended_mask` is not applied.** DISP-S1's `recommended_mask` (water, unwrapping components) and `short_wavelength_displacement` are not used yet. Only `temporal_coherence` gates pixels, as specified.
 * **Line-of-sight only.** Displacement is LOS, not decomposed into vertical and east components, and ascending and descending tracks are not combined.
+
+---
+
+## Phase 4: Hydrological flow engine and DSWx processing
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `backend/app/pipelines/hydrology.py` | GLO-30 download and loading; DSWx-HLS series loading and mosaicking; water boundaries; D_crest and alerts; Horn slope/aspect; priority-flood filling; Tarboton D∞ directions and accumulation; flow vectors, stream network and flow-path tracing; vegetation mask; Zarr output. |
+| `backend/app/pipelines/ingestion.py` | New `download_granule_series()`: downloads the science asset of every granule touching the bbox, with an optional cloud-cover cap. It is used for the DSWx-HLS time series. |
+| `backend/app/main.py` | New CLI command `hydrology --facility NAME [--bbox] [--download] [--max-cloud] [--dem ...] [--dswx-dir] [--crest] [--boundary] [--ndvi] [--stream-threshold] [--output]`. |
+| `backend/tests/test_hydrology.py` | 25 tests plus 1 opt-in live GLO-30 test. |
+
+### Engine behaviour
+
+* **GLO-30 DEM.**
+  * 1° Copernicus COG tiles come from the public `copernicus-dem-30m` AWS bucket over HTTPS, with no credentials. The tile name is the SW corner, `floor(lat)` / `floor(lon)`; this was checked against the real N31/W112 and S21/W045 tile bounds.
+  * Missing (ocean) tiles are skipped. Tiles are mosaicked, cropped and reprojected (bilinear) to a **30 m UTM 32612 grid snapped to the bbox**.
+  * Every other layer is put on this grid.
+* **DSWx-HLS `B01_WTR`.**
+  * The class codes were checked against OPERA's PROTEUS source (commit `426a9e7`): 0 not water, 1 open water, 2 partial surface water, 252 snow/ice, 253 cloud/shadow, 254 ocean, 255 fill.
+  * The sensing time is parsed from the DAAC filename (`OPERA_L3_DSWx-HLS_T<tile>_<sensing>Z_<production>Z_<sensor>_30_v1.0_B01_WTR.tif`). **This pattern is from the DAAC naming convention and has not been checked against a real downloaded file.**
+  * Granules are nearest-resampled onto the grid. Tiles from the same date are mosaicked; the first valid value wins.
+* **Water boundary and D_crest(t).**
+  * Water is WTR ∈ {1, 2} inside the facility boundary. The boundary comes from `--boundary` or `DATA_DIR/reference/<facility>_boundary.geojson`, and falls back to the bbox.
+  * Water cells are polygonised at their pixel edges. D_crest is the shapely distance from those polygons to the crest line, in metres (0 if the water touches the crest).
+* **Epoch status.**
+  * `no-data`: less than 50 % of the facility is observed.
+  * `no-water`.
+  * `obscured-upper-bound`: snow, cloud, fill or vegetated cells lie closer to the crest than the observed water.
+  * `valid`.
+* **Alerts** are raised only on `valid` epochs, with these bit flags:
+  * `1`: ΔD_crest against the first valid epoch < −30 m.
+  * `2`: ΔD_crest against the previous valid epoch < −30 m.
+  * `4`: D_crest < 15 m.
+
+  Alerts are listed in the run summary and logged as warnings.
+* **Terrain.**
+  * Horn (1981) slope and aspect. Aspect is the downslope azimuth, clockwise from north; it is NaN at edges and on flat ground.
+  * Priority-flood depression filling with an epsilon gradient (Barnes et al., 2014). `depression_depth` keeps the fill depth, which marks ponds and pits.
+  * Tarboton (1997) D∞ on the 8 triangular facets: a continuous steepest-descent angle, with flow split between the two facet neighbours in proportion to the angle.
+  * Flow accumulation is computed from high to low elevation, as a cell count and a contributing area in m².
+  * Flow vectors (`flow_u` / `flow_v`) and accumulation vectors (contributing area × unit vector).
+  * A stream network where accumulation ≥ 100 cells (0.09 km²).
+  * `trace_flow_path()` follows the dominant receiver downslope, for Phase 5's slope-path checks.
+* **Vegetation filter.**
+  * NDVI > 0.35 comes from the Phase 2 `<Facility>_spectral.zarr` (`ndvi`) or an NDVI raster given with `--ndvi`.
+  * Vegetated cells get `terrain_observability = 1`; their slope, aspect and flow direction/vectors are NaN. Accumulation still passes through them, so flow stays continuous.
+  * Vegetated cells also count as unknown in the D_crest obscuration check.
+  * With no NDVI source, the filter is recorded as `unavailable` and a warning is logged.
+* **Output: `DATA_DIR/cache/<Facility>_hydrology.zarr`** (open with `decode_coords="all"`).
+  * Grids: `elevation`, `elevation_filled`, `depression_depth`, `slope_deg`, `aspect_deg`, `flow_direction_deg`, `flow_u` / `flow_v`, `flow_accumulation_cells`, `contributing_area_m2`, `accumulation_vector_u` / `_v`, `stream_network`, `terrain_observability`.
+  * With DSWx: `water_class (time, y, x)` and `water_area_m2 (time)`.
+  * With a crest line, per epoch: `d_crest_m`, `d_crest_status`, `d_crest_unknown_distance_m`, `observed_fraction`, `delta_d_crest_baseline_m`, `delta_d_crest_previous_m`, `setback_alert_flags`.
+  * A JSON summary goes to `DATA_DIR/logs/`.
+
+### Verification
+
+```
+$ cd backend && pytest
+133 passed, 4 skipped
+$ LITHOCREEP_LIVE_TESTS=1 pytest tests/test_hydrology.py -k live   # real GLO-30 download
+1 passed
+```
+
+`test_hydrology.py` (25 passed) covers:
+
+* **Distances:** exact pixel-edge distances (120 m; 90√2 m to a segment end); crest crossing water gives 0.
+* **Epoch status:** cloud-obscured and vegetation-obscured epochs; facility-boundary exclusion; no-data epochs.
+* **Alerts:** baseline, previous and proximity flags, including that obscured epochs never alert and that exactly −30 m doesn't alert.
+* **Terrain:** Horn slope and aspect on 6 tilted planes; flat ground.
+* **D∞:** angle (30°) and the 1/3–2/3 split on a plane; mass conservation of accumulation (every unit reaches one outlet; no interior sinks after filling); a V-valley routes to its axis and outlet; trace path; pit filling.
+* **Inputs:** GLO-30 tile names (N/S/E/W, multi-tile); download with streaming, 404 skip and reuse; DSWx filename parsing and same-day mosaicking.
+* **Vegetation:** masking of terrain outputs.
+* **CLI end to end:** synthetic DEM, 4 DSWx epochs and a crest GeoJSON. D_crest is ≈ 300 / 310 / 60 / 5 m, with shrink and proximity alerts; the offline fallbacks are logged.
+
+**Real-data run** (`hydrology --facility Sierrita --download`, GLO-30 downloaded live):
+
+| Measure | Value |
+|---------|-------|
+| Grid | 260 × 253 cells (30 m) |
+| Elevation | 710.5–1309.9 m |
+| Slope | median 3.4°, 95th percentile 20.9° |
+| Largest contributing area | 16.0 km² |
+| Stream cells | 4,343 |
+| Closed depressions > 1 m deep | 0.66 km² (fill depth up to 20.8 m) |
+
+This run produced terrain products only. DSWx was skipped because Earthdata is blocked, and there was no crest line and no NDVI.
+
+### Known gaps
+
+* **No crest line for any facility.** D_crest and the setback alerts need an embankment crest LineString, passed with `--crest` or saved as `DATA_DIR/reference/<facility>_crest.geojson`.
+  * I did not invent or derive one; a crest traced from imagery or the operator's GISTM disclosure is needed.
+  * Phase 6's `crest_line_geom` field should be the long-term source.
+* **DSWx has not run on real granules.** Earthdata is blocked in this sandbox, so neither the filename pattern nor the mosaicking has met a real granule.
+* **Alerts can be triggered by pixel noise.** The −30 m shrink threshold equals one DSWx pixel, so a single-pixel shoreline flicker can trigger an alert. Consider requiring persistence over two or more valid epochs before acting on one.
+* **The DEM is a decade old.** GLO-30 is a surface model (it includes canopy and structures) built from TanDEM-X data acquired around 2011–2015. At an active tailings facility the embankments and beaches have changed since, so slopes and flow paths over the facility itself are historical.
+* **Coarse vegetation mask.** The NDVI comes from 60 m EMIT data (Phase 2) bilinearly resampled to 30 m, so it is coarse at the edges.
 

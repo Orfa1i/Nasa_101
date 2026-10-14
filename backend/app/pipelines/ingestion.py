@@ -394,6 +394,39 @@ def download_assets(links: Sequence[str], raw_dir: Path, settings: Settings) -> 
     return [Path(p) for p in paths]
 
 
+def download_granule_series(
+    dataset_id: str,
+    bbox: Sequence[float],
+    settings: Settings,
+    temporal: tuple[str, str] = DEFAULT_TEMPORAL,
+    max_granules: int = MAX_GRANULES,
+    max_cloud_cover: Optional[float] = None,
+) -> list[Path]:
+    """Download the science asset of every granule touching ``bbox`` (e.g. a DSWx-HLS time series).
+
+    Granules whose footprint misses the bbox, or (optical products) whose cloud
+    cover exceeds ``max_cloud_cover`` percent, are skipped. Earthdata connection
+    errors propagate so the caller can fall back to files already on disk.
+    """
+    spec = get_product(dataset_id)
+    bbox = validate_bbox(bbox)
+    granules = search_granules(spec, bbox, temporal, count=max_granules)
+    keep = []
+    for granule in granules:
+        coverage = bbox_coverage(granule, bbox)
+        if coverage is not None and coverage <= 0:
+            continue
+        cloud = granule_cloud_cover(granule)
+        if max_cloud_cover is not None and spec.optical and cloud is not None and cloud > max_cloud_cover:
+            continue
+        keep.append(granule)
+    links = [link for g in keep for link in select_asset_links(g, spec)]
+    logger.info("Downloading %d %s asset(s) from %d granule(s)", len(links), dataset_id, len(keep))
+    if not links:
+        return []
+    return download_assets(links, settings.raw_dir / spec.short_name, settings)
+
+
 def download_disp_stack(
     bbox: Sequence[float],
     settings: Settings,
