@@ -503,6 +503,7 @@ def couple(
     ds.attrs.update(
         {
             "facility_hazard_level": hazard,
+            "last_insar_epoch": str(last_epoch),
             "regime_counts": json.dumps(counts),
             "setback_state": json.dumps(setback),
             "input_provenance": json.dumps(provenance),
@@ -561,6 +562,7 @@ def run_coupling(
         earthworks = geometry_mask([geom], out_shape=master.shape, transform=master.rio.transform(), invert=True)
     ds = couple(spectral, kinematics, hydro, earthworks_mask=earthworks)
     ds.attrs["facility"] = facility
+    ds.attrs["created_utc"] = pd.Timestamp.now(tz="UTC").isoformat()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     compressor = zarr.Blosc(cname="zstd", clevel=5, shuffle=zarr.Blosc.BITSHUFFLE)

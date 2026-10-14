@@ -6,6 +6,7 @@ in the working directory) via pydantic-settings:
 * ``EARTHDATA_USERNAME`` / ``EARTHDATA_PASSWORD`` - NASA Earthdata Login
   credentials used by ``earthaccess``. Both default to ``None``; without them
   ``earthaccess`` falls back to ``~/.netrc``.
+* ``CORS_ORIGINS`` - comma-separated origins allowed to call the API.
 * ``DATA_DIR`` - root of the local data store (default ``"../data"``). A
   relative path is resolved against the ``backend/`` directory, so the default
   always points at ``<repo>/data`` regardless of the current working directory.
@@ -53,6 +54,8 @@ class Settings(BaseSettings):
     EARTHDATA_USERNAME: Optional[str] = None
     EARTHDATA_PASSWORD: Optional[str] = None
     DATA_DIR: str = "../data"
+    # Comma-separated origins allowed by the API's CORS policy (the Next.js dev server by default).
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     @model_validator(mode="after")
     def _validate_data_dir(self) -> "Settings":
@@ -94,6 +97,10 @@ class Settings(BaseSettings):
     @property
     def log_dir(self) -> Path:
         return self.data_path / "logs"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
     @property
     def has_earthdata_credentials(self) -> bool:

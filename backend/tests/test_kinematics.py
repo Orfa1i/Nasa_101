@@ -205,8 +205,8 @@ def disp_name(ref, sec, gen="20250101T000000Z", frame=12345):
     return f"OPERA_L3_DISP-S1_IW_F{frame:05d}_VV_{ref}T120000Z_{sec}T120000Z_v1.0_{gen}.nc"
 
 
-def write_disp(path: Path, disp_m: np.ndarray, coherence: np.ndarray, res=30.0):
-    x0, y0 = TO_UTM.transform(-111.13, 31.91)
+def write_disp(path: Path, disp_m: np.ndarray, coherence: np.ndarray, res=30.0, origin=(-111.13, 31.91)):
+    x0, y0 = TO_UTM.transform(*origin)
     ny, nx = disp_m.shape
     x = x0 + (np.arange(nx) + 0.5) * res
     y = y0 - (np.arange(ny) + 0.5) * res

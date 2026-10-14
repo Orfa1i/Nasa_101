@@ -16,3 +16,7 @@ data/mock/
 
 # Generated pipeline outputs
 data/cache/*_spectral.zarr/
+
+# Local metadata database (rebuilt on API start-up)
+data/*.duckdb
+data/*.duckdb.wal

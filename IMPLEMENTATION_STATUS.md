@@ -9,7 +9,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 3 | Kinematics / InSAR trend modelling | **Done**: tests pass. Timelines are biased late (see below); no real DISP-S1 stack or Brumadinho CSV has been run yet |
 | 4 | Hydrology / DSWx setback and flow routing | **Done**: tests pass and terrain/routing ran on real GLO-30 for Sierrita. The setback series has not run on real DSWx, and no crest line exists yet |
 | 5 | Co-anomaly coupling and regime classifier | **Done**: tests pass, including a full Phase 2→5 chain. No real classification exists yet (no real EMIT, DISP-S1 or DSWx data) |
-| 6 | API and database | Not started |
+| 6 | API and database | **Done**: tests pass, unmocked; serves real GLO-30 terrain for Sierrita. The other layers wait on real EMIT, DISP-S1 and DSWx inputs |
 | 7 | Audit copilot | Not started |
 | 8 | Next.js / deck.gl map | Not started |
 | 9 | Inspector panels | Not started |
@@ -514,4 +514,96 @@ See `DECISIONS.md` → *Results to date* for the full tables. In short:
 * **Edge resampling effects.**
   * Bilinear 60 → 30 m resampling dilutes SAI at block edges, which creates code-5 fringes.
   * Grid-edge cells have no Horn aspect, so they can't be aspect-validated.
+
+---
+
+## Phase 6: API and unified database
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `data/global_tailings.geojson` | Seed registry for Sierrita, Mission, Bingham Canyon and Brumadinho (contents below). |
+| `backend/app/database.py` | DuckDB store (`DATA_DIR/lithocreep.duckdb`) with the `facilities` and `alerts` tables, rebuilt at start-up. |
+| `backend/app/api/schemas.py` | Pydantic contracts: `Facility` and `Alert` (exactly the specified fields), plus `Matrix`, `PixelResponse` and its sections, `LayerInfo` and `Health`. |
+| `backend/app/api/layers.py` | Cached-product access: the layer registry, source fallbacks, the EPSG:4326 reprojection and crop, and point sampling. |
+| `backend/app/api/endpoints.py` | FastAPI routes, CORS and the `create_app()` factory. `app.main:app` is the ASGI app, so `uvicorn app.main:app` works as the playbook says. |
+| `backend/app/main.py` and `config.py` | `ingest` now **merges** into the registry, keeping curated metadata where it used to overwrite it. Bingham is added to the known facilities. New `CORS_ORIGINS` setting. |
+| `backend/app/pipelines/coupling.py` | Coupled products now record `created_utc` and `last_insar_epoch`, used for the alert timestamps. |
+| `backend/tests/test_api.py` | 16 tests: real app, real DuckDB, real pipeline outputs, no mocks. |
+
+**Seed registry contents.** Only facts I'm confident of are filled in.
+
+| Facility | Operator | Commodity | Embankment | Status | Notes |
+|----------|----------|-----------|------------|--------|-------|
+| Sierrita | Freeport-McMoRan | copper-molybdenum | `unknown` | ACTIVE | |
+| Mission | ASARCO | copper | `unknown` | ACTIVE | |
+| Bingham Canyon | Rio Tinto Kennecott | copper | `unknown` | ACTIVE | **Approximate** bbox around the pit, flagged in `metadata_notes`. The Magna tailings impoundment is a separate site. |
+| Brumadinho Dam I | Vale | iron ore | upstream | FAILED (2019-01-25) | |
+
+`crest_line_geom` is `null` for every facility.
+
+### Behaviour
+
+* **Database.**
+  * `facilities` is built from the seed registry, merged field by field with `DATA_DIR/global_tailings.geojson`. All four required facilities must be present, or start-up fails.
+  * `alerts` has one row per `<prefix>_coupled.zarr`: the facility hazard level, the earliest REGIME_4 failure date with its 2σ in days, and JSON evidence (regime counts, setback state, input provenance, synthetic flag, disclaimer).
+  * CHECK constraints enforce the hazard levels and bbox order.
+  * The database is a derived cache, so the tables are recreated on every launch. DuckDB 0.9 cannot delete and re-insert a primary key in one transaction.
+* **Routes.**
+  * `GET /api/health`
+  * `GET /api/facilities` and `GET /api/facilities/{id}`
+  * `GET /api/facilities/{id}/alerts`
+  * `GET /api/facilities/{id}/layers`: which layers exist, their sources and epochs.
+  * `GET /api/facilities/{id}/matrices?layer=&t=`
+  * `GET /api/facilities/{id}/pixel?lat=&lon=`
+* **Matrices.**
+  * 15 layers: `sai`, `spectral_rmse`, `displacement`, `velocity`, `acceleration`, `coherence`, `anomaly_regime`, `alert_tier`, `elevation`, `slope`, `aspect`, `flow_accumulation`, `stream_network`, `water_class`, `hydraulic_distance`.
+  * Each is reprojected from UTM to an **EPSG:4326 grid at 1 arc-second (~30 m) whose outer bounds equal the facility bbox exactly**. Sierrita is 252 × 288.
+  * Bilinear for continuous values; nearest for categories and angles.
+  * Values are JSON arrays with `null` for no-data.
+  * Time-dependent layers use the epoch nearest to `t`, or the latest; the response also lists the available epochs.
+  * `hydraulic_distance` is the Euclidean distance to DSWx water, and is labelled as not being a flow-path distance.
+  * Every response carries a `source` with `synthetic_or_mock` and a label, for the UI watermark.
+* **Pixel.**
+  * The point must lie inside the facility bbox (422 otherwise).
+  * Each product is sampled at the point's UTM position. **Bilinear** interpolation between the 4 nearest cells is used when the point is not on a cell centre; it is **exact** within 0.5 m of one. Classes, aspect and flow direction always use the nearest cell. Each section reports its method and the distance to the nearest cell.
+  * Returned: the kinematic time series with 95 % bounds, status and instability time; spectral values and abundances; hydrology values, the water-class series and the facility D_crest series; and the classification (regime, tier, flags, intervals, failure time).
+  * **Non-CONUS facilities (Brumadinho)** never use DISP-S1. Their kinematics come from the Phase 3 analysed point product if it exists, otherwise from `data/brumadinho_historic.csv` (nearest monitoring point by distance).
+* **Errors.**
+  * 404: unknown facility, missing product (the message names the command that creates it), or no data at the point.
+  * 422: bad layer, time or coordinates.
+  * 503: product files exist but none can be read.
+  * Unreadable caches **fall back** to the layer's next source (e.g. `sai` from the coupled product falls back to the spectral product), with a note. They are skipped for alerts, and the pixel endpoint reports them per section without failing.
+* **CORS.** Origins come from `CORS_ORIGINS` (default `http://localhost:3000,http://127.0.0.1:3000`), methods `GET` and `OPTIONS`.
+
+### Verification
+
+```
+$ cd backend && pytest
+167 passed, 4 skipped
+```
+
+`test_api.py` (16 passed, **no mocks**) pushes a synthetic ~1 km site inside the Sierrita bbox through the real Phase 2–5 pipelines, then serves the products with the real app (including start-up) and a real DuckDB file. It covers:
+
+* **Database:** populated on launch; facility responses validate against `Facility` with exactly the specified fields; the OpenAPI schemas publish `Facility` and `Alert`; alerts come from the coupled product.
+* **Matrices:** exact bounds, shape and resolution; a REGIME_4 value at a known cell; nulls outside the data; nearest-epoch time selection; hydraulic distance; the 404 and 422 errors.
+* **Pixel:** an exact cell (REGIME_4, accelerating-forecast, consistent bounds); a bilinear offset that matches xarray interpolation; the 422 and 404 errors.
+* **Fallbacks:** a corrupted coupled product makes `sai` fall back to spectral, `anomaly_regime` return 503, the pixel classification come back as unreadable, and start-up still succeed.
+* **Brumadinho:** 404 without the CSV; nearest-point CSV series once the CSV is supplied (synthetic stand-in); the GP-analysed series after a Phase 3 backtest run.
+* **CORS:** allowed and disallowed origins.
+* **Registry:** an `ingest` update keeps the curated metadata.
+
+**Real-data check.** `uvicorn app.main:app` served the **real GLO-30** Sierrita hydrology product from Phase 4:
+
+* The `elevation` matrix is exactly the bbox, 252 × 288, 100 % valid, 710–1310 m, labelled `GLO-30 DEM`.
+* The pixel query returned real elevation, slope and aspect via bilinear interpolation, and listed the absent products (kinematics, spectral, classification) under `unavailable`.
+
+### Known gaps
+
+* **Only terrain is real.** Every other layer waits on real EMIT, DISP-S1 and DSWx inputs (Earthdata is blocked in this sandbox) and on a sourced crest line.
+* **No authentication or rate limiting.** CORS only.
+* **Large JSON responses.** A matrix is about 72k cells (~0.5 MB JSON for Sierrita). Tiles or binary formats would be better for the deck.gl front end (Phase 8).
+* **Startup only.** The database is rebuilt at start-up, so new pipeline outputs appear after a restart.
+* **Bingham Canyon bbox is approximate** and needs confirming.
 

@@ -1,0 +1,202 @@
+{
+ "type": "FeatureCollection",
+ "name": "global_tailings",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "sierrita",
+    "name": "Freeport-McMoRan Sierrita TSF",
+    "country": "USA",
+    "latitude": 31.865,
+    "longitude": -111.08,
+    "bbox_xmin": -111.12,
+    "bbox_ymin": 31.83,
+    "bbox_xmax": -111.04,
+    "bbox_ymax": 31.9,
+    "mine_type": "copper-molybdenum (porphyry)",
+    "embankment_type": "unknown",
+    "crest_line_geom": null,
+    "status": "ACTIVE",
+    "cache_prefix": "Sierrita",
+    "operator": "Freeport-McMoRan",
+    "region": "Pima County, Arizona",
+    "metadata_notes": "bbox from IMPLEMENTATION_PLAYBOOK.md; embankment construction method and crest line not yet sourced"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -111.12,
+       31.83
+      ],
+      [
+       -111.04,
+       31.83
+      ],
+      [
+       -111.04,
+       31.9
+      ],
+      [
+       -111.12,
+       31.9
+      ],
+      [
+       -111.12,
+       31.83
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "mission",
+    "name": "ASARCO Mission Complex TSF",
+    "country": "USA",
+    "latitude": 31.975,
+    "longitude": -111.04,
+    "bbox_xmin": -111.08,
+    "bbox_ymin": 31.94,
+    "bbox_xmax": -111.0,
+    "bbox_ymax": 32.01,
+    "mine_type": "copper",
+    "embankment_type": "unknown",
+    "crest_line_geom": null,
+    "status": "ACTIVE",
+    "cache_prefix": "Mission",
+    "operator": "ASARCO (Grupo Mexico)",
+    "region": "Pima County, Arizona",
+    "metadata_notes": "bbox from IMPLEMENTATION_PLAYBOOK.md; embankment construction method and crest line not yet sourced"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -111.08,
+       31.94
+      ],
+      [
+       -111.0,
+       31.94
+      ],
+      [
+       -111.0,
+       32.01
+      ],
+      [
+       -111.08,
+       32.01
+      ],
+      [
+       -111.08,
+       31.94
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "bingham",
+    "name": "Kennecott Bingham Canyon",
+    "country": "USA",
+    "latitude": 40.525,
+    "longitude": -112.15,
+    "bbox_xmin": -112.19,
+    "bbox_ymin": 40.49,
+    "bbox_xmax": -112.11,
+    "bbox_ymax": 40.56,
+    "mine_type": "copper (with gold, silver, molybdenum)",
+    "embankment_type": "unknown",
+    "crest_line_geom": null,
+    "status": "ACTIVE",
+    "cache_prefix": "Bingham",
+    "operator": "Rio Tinto Kennecott",
+    "region": "Salt Lake County, Utah",
+    "metadata_notes": "APPROXIMATE bbox around the Bingham Canyon pit (~40.52 N, 112.15 W), not survey-verified; Kennecott's tailings impoundment near Magna is a separate site and is not covered by this box"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -112.19,
+       40.49
+      ],
+      [
+       -112.11,
+       40.49
+      ],
+      [
+       -112.11,
+       40.56
+      ],
+      [
+       -112.19,
+       40.56
+      ],
+      [
+       -112.19,
+       40.49
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "brumadinho",
+    "name": "Brumadinho Dam I (Corrego do Feijao)",
+    "country": "Brazil",
+    "latitude": -20.12,
+    "longitude": -44.125,
+    "bbox_xmin": -44.15,
+    "bbox_ymin": -20.14,
+    "bbox_xmax": -44.1,
+    "bbox_ymax": -20.1,
+    "mine_type": "iron ore",
+    "embankment_type": "upstream",
+    "crest_line_geom": null,
+    "status": "FAILED",
+    "cache_prefix": "Brumadinho",
+    "operator": "Vale S.A.",
+    "region": "Minas Gerais",
+    "metadata_notes": "Dam I failed on 2019-01-25; historical backtest site. OPERA DISP-S1 has no coverage here: kinematics come from data/brumadinho_historic.csv (not bundled). bbox from IMPLEMENTATION_PLAYBOOK.md"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -44.15,
+       -20.14
+      ],
+      [
+       -44.1,
+       -20.14
+      ],
+      [
+       -44.1,
+       -20.1
+      ],
+      [
+       -44.15,
+       -20.1
+      ],
+      [
+       -44.15,
+       -20.14
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

@@ -25,6 +25,8 @@ RMSE/validation JSON log in ``DATA_DIR/logs/``.
 DSWx-HLS granules and a crest line, the pond-to-crest setback series and alerts,
 writing ``DATA_DIR/cache/<Facility>_hydrology.zarr``.
 
+``uvicorn app.main:app`` serves the HTTP API (``app/api/endpoints.py``).
+
 ``couple`` aligns the spectral, kinematics and hydrology outputs on one 30 m UTM
 grid, tests pond -> moving slope -> seepage connectivity and assigns the
 4-regime hazard classes, writing ``DATA_DIR/cache/<Facility>_coupled.zarr``.
@@ -46,6 +48,7 @@ if __package__ in (None, ""):  # executed as a script: make the ``app`` package 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import pyogrio
 from shapely.geometry import box
@@ -71,6 +74,13 @@ KNOWN_FACILITIES = {
         "full_name": "ASARCO Mission Complex TSF",
         "country": "USA",
         "bbox": (-111.08, 31.94, -111.00, 32.01),
+    },
+    "bingham": {
+        "name": "Bingham",
+        "full_name": "Kennecott Bingham Canyon",
+        "country": "USA",
+        # Approximate box around the Bingham Canyon pit (~40.52 N, 112.15 W); not survey-verified.
+        "bbox": (-112.19, 40.49, -112.11, 40.56),
     },
     "brumadinho": {
         "name": "Brumadinho",
@@ -220,9 +230,21 @@ def update_tailings_registry(
     )
     if registry_path.exists():
         existing = pyogrio.read_dataframe(registry_path)
-        if "status" in existing and (existing["id"] == slug).any():
-            feature.loc[0, "status"] = existing.loc[existing["id"] == slug, "status"].iloc[0]
-        existing = existing[existing["id"] != slug]
+        mine = existing["id"] == slug
+        if mine.any():
+            # Keep curated metadata (name, mine/embankment type, crest line, status, ...): only the
+            # bbox-derived fields and the ingest-run fields are refreshed.
+            previous = existing.loc[mine].iloc[0]
+            refreshed = {"latitude", "longitude", "bbox_xmin", "bbox_ymin", "bbox_xmax", "bbox_ymax",
+                         "ingest_status", "last_run_id", "last_run_utc", "last_run_results", "geometry", "id"}
+            for column, value in previous.items():
+                if column in refreshed:
+                    continue
+                if column in feature.columns and column not in ("name", "country", "status"):
+                    continue
+                if value is not None and not (isinstance(value, float) and np.isnan(value)):
+                    feature[column] = [value]
+        existing = existing[~mine]
         feature = gpd.GeoDataFrame(pd.concat([existing, feature], ignore_index=True), crs="EPSG:4326")
 
     tmp_path = registry_path.with_name(f".{registry_path.name}.tmp")
@@ -504,6 +526,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_couple(args, settings)
     parser.error(f"unknown command {args.command!r}")
     return 2
+
+
+# ASGI application for `uvicorn app.main:app` (the database is built on start-up, not on import).
+from app.api.endpoints import create_app  # noqa: E402
+
+app = create_app()
 
 
 if __name__ == "__main__":

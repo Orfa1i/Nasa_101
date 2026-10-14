@@ -398,15 +398,21 @@ def test_cli_couple_reports_missing_inputs(cli_settings):
 # --------------------------------------------------------------------------- #
 
 
-def test_full_chain_unmix_kinematics_hydrology_couple(tmp_path):
-    """Synthetic inputs, real pipeline code: Phase 2-4 outputs must be valid coupler inputs."""
+CHAIN_BBOX = (-111.127, 31.896, -111.117, 31.906)
+
+
+def build_full_chain(tmp_path, *, facility="Test", bbox=CHAIN_BBOX, settings=None):
+    """Run the real Phase 4, 2 and 3 pipelines on a ~1 km synthetic site, then Phase 5.
+
+    The site has a pond at the top, a moving (accelerating) block mid-slope and a
+    seepage toe; returns the settings, the coupling summary and the geometry helpers.
+    """
     from app.config import Settings
     from tests.test_hydrology import dswx_name, write_wtr
     from tests.test_kinematics import disp_name, write_disp
     from tests.test_unmixing import make_cube, write_input_zarr
 
-    settings = Settings(DATA_DIR=str(tmp_path / "data"))
-    bbox = (-111.127, 31.896, -111.117, 31.906)
+    settings = settings or Settings(DATA_DIR=str(tmp_path / "data"))
     gx0, gy0, gx1, gy1 = hyd.utm_grid_bounds(bbox, "EPSG:32612")
     pond_bottom = [gy1 - 150, gy1 - 210]  # the pond grows towards the crest between epochs
     crest_y = gy1 - 300
@@ -429,8 +435,8 @@ def test_full_chain_unmix_kinematics_hydrology_couple(tmp_path):
     crest = tmp_path / "crest.geojson"
     crest.write_text(json.dumps({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {},
         "geometry": {"type": "LineString", "coordinates": [[lon0, lat0], [lon1, lat1]]}}]}))
-    hydro_out = settings.cache_dir / "Test_hydrology.zarr"
-    hyd.run_hydrology("Test", bbox, hydro_out, settings=settings, dem_paths=[tmp_path / "dem.tif"],
+    hydro_out = settings.cache_dir / f"{facility}_hydrology.zarr"
+    hyd.run_hydrology(facility, bbox, hydro_out, settings=settings, dem_paths=[tmp_path / "dem.tif"],
                       dswx_paths=sorted(dswx.glob("*.tif")), crest_path=crest)
 
     # Phase 2: EMIT-like cube on a 60 m grid; jarosite/montmorillonite-rich on the block and the toe.
@@ -447,14 +453,15 @@ def test_full_chain_unmix_kinematics_hydrology_couple(tmp_path):
     f[names.index("Quartz-Feldspar")] = np.where(seep, 0.1, 0.9)
     f[names.index("Water-Shade")] = np.where(seep, 0.0, 0.1)
     cube = make_cube(M_full, wl, f, x0=x0, y0=y0, res=60.0)
-    spectral_out = settings.cache_dir / "Test_spectral.zarr"
+    spectral_out = settings.cache_dir / f"{facility}_spectral.zarr"
     unmixing.run_spectral_pipeline(write_input_zarr(cube, tmp_path / "rfl.zarr"), spectral_out, settings=settings)
 
     # Phase 3: DISP-S1 stack with an accelerating block.
     stack = tmp_path / "stack"
     stack.mkdir()
     shape = (60, 60)
-    dx0, dy0 = TO_UTM.transform(-111.13, 31.91)
+    origin = TO_LONLAT.transform(gx0 - 300, gy1 + 300)
+    dx0, dy0 = TO_UTM.transform(*origin)
     DX, DY = np.meshgrid(dx0 + (np.arange(shape[1]) + 0.5) * RES, dy0 - (np.arange(shape[0]) + 0.5) * RES)
     times = pd.date_range("2023-01-01", periods=60, freq="12D")
     ty = ((times - times[0]).days / kin.DAYS_PER_YEAR).to_numpy()
@@ -464,12 +471,20 @@ def test_full_chain_unmix_kinematics_hydrology_couple(tmp_path):
     moving = block(DX, DY)
     for i in range(1, times.size):
         d = rng.normal(0, 0.3, shape) / 1000.0 + np.where(moving, accel_mm[i] / 1000.0, 0.0)
-        write_disp(stack / disp_name(times[0].strftime("%Y%m%d"), times[i].strftime("%Y%m%d")), d, np.full(shape, 0.9))
-    kin_out = settings.cache_dir / "Test_kinematics.zarr"
-    kin.run_kinematics("Test", bbox, kin_out, settings=settings, stack_paths=sorted(stack.glob("*.nc")), hyperparameters="hybrid")
+        write_disp(stack / disp_name(times[0].strftime("%Y%m%d"), times[i].strftime("%Y%m%d")), d, np.full(shape, 0.9), origin=origin)
+    kin_out = settings.cache_dir / f"{facility}_kinematics.zarr"
+    kin.run_kinematics(facility, bbox, kin_out, settings=settings, stack_paths=sorted(stack.glob("*.nc")), hyperparameters="hybrid")
 
     # Phase 5.
-    summary = cp.run_coupling("Test", spectral_out, kin_out, hydro_out, settings.cache_dir / "Test_coupled.zarr")
+    summary = cp.run_coupling(facility, spectral_out, kin_out, hydro_out, settings.cache_dir / f"{facility}_coupled.zarr")
+    return {"settings": settings, "summary": summary, "block": block, "toe": toe, "grid_bounds": (gx0, gy0, gx1, gy1)}
+
+
+def test_full_chain_unmix_kinematics_hydrology_couple(tmp_path):
+    """Synthetic inputs, real pipeline code: Phase 2-4 outputs must be valid coupler inputs."""
+    chain = build_full_chain(tmp_path)
+    settings, summary, block, toe = chain["settings"], chain["summary"], chain["block"], chain["toe"]
+    gx0, gy0, gx1, gy1 = chain["grid_bounds"]
     ds = xr.open_zarr(settings.cache_dir / "Test_coupled.zarr", decode_coords="all")
     MX, MY = np.meshgrid(ds["x"].values, ds["y"].values)
     regime = ds["regime"].values
