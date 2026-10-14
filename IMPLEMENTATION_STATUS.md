@@ -13,7 +13,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 7 | Audit copilot | **Done**: tests pass, including the Claude tool-use loop against a scripted client. No live Claude call has been made (no API credentials in this sandbox), and every brief so far was built from synthetic test products |
 | 8 | Next.js / deck.gl map | **Done**: unit, component and browser tests pass against the real backend (serving the synthetic demo site), with real WebGL rendering in headless Chromium. No Mapbox token was available, so only the open MapLibre / Terrarium path has run, and with locally served stand-in tiles |
 | 9 | Inspector panels | **Done**: unit, component and browser tests pass, including charts checked against the real API's pixel responses for the synthetic demo site. No real EMIT spectrum or DISP-S1 series has been plotted yet |
-| 10 | Scenarios, backtest UI, CI | **Done**: backend, unit, component and browser tests pass; secrets scan and bundle checks pass; CI workflow added. The backtest has only run on a labelled synthetic stand-in (the published Brumadinho series is not bundled) |
+| 10 | Scenarios, backtest UI, CI | **Done**: backend, unit, component and browser tests pass; secrets scan and bundle checks pass; the first GitHub Actions CI run is green (backend, frontend, e2e). The backtest has only run on a labelled synthetic stand-in (the published Brumadinho series is not bundled) |
 
 **Roadmap: 10 of 10 phases implemented (100 %).** Every phase's code, tests and documentation are in place, and all suites pass (see *Roadmap completion* at the end). What remains is validation against inputs this sandbox could not reach. None of it is code work, and each item is listed under *Outstanding real-data validation*.
 
@@ -1108,7 +1108,7 @@ fresh backend/.venv (Python 3.11, exact pins) + npm ci: completed; scripts/verif
 | 7 | Audit copilot | Tool loop against a scripted SDK client; deterministic mode end to end |
 | 8 | deck.gl map | Real WebGL in headless Chromium against the real backend |
 | 9 | Double Inspector | Charts checked against the API's pixel responses |
-| 10 | Scenarios, Copilot UI, fallbacks, CI | As above; CI workflow committed |
+| 10 | Scenarios, Copilot UI, fallbacks, CI | As above; first GitHub Actions run green (run 38556010746: backend, frontend and e2e jobs all passed on commit 0b19301) |
 
 ### Data boundaries
 
@@ -1126,4 +1126,3 @@ fresh backend/.venv (Python 3.11, exact pins) + npm ci: completed; scripts/verif
 4. **Mapbox.** A run with a real `MAPBOX_ACCESS_TOKEN`; only the open path and the fallback have been exercised.
 5. **Claude.** A live copilot run with `ANTHROPIC_API_KEY` (`LITHOCREEP_LIVE_LLM=1 pytest tests/test_agent.py -k live`).
 6. **GISTM review.** The principle mapping is paraphrased and needs review by a qualified engineer.
-7. **CI.** A first run of `.github/workflows/ci.yml` on GitHub.
