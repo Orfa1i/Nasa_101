@@ -6,6 +6,7 @@ Usage (from the repository root or from ``backend/``)::
     python backend/app/main.py unmix --facility Sierrita
     python backend/app/main.py kinematics --facility Sierrita [--download]
     python backend/app/main.py hydrology --facility Sierrita [--download] [--crest crest.geojson]
+    python backend/app/main.py couple --facility Sierrita
 
 ``ingest`` runs ``download_and_crop`` for each requested product, writes the
 clipped rasters to ``DATA_DIR/processed/<facility>/``, records the run on the
@@ -23,6 +24,10 @@ RMSE/validation JSON log in ``DATA_DIR/logs/``.
 ``hydrology`` builds GLO-30 terrain/D-infinity routing products and, with
 DSWx-HLS granules and a crest line, the pond-to-crest setback series and alerts,
 writing ``DATA_DIR/cache/<Facility>_hydrology.zarr``.
+
+``couple`` aligns the spectral, kinematics and hydrology outputs on one 30 m UTM
+grid, tests pond -> moving slope -> seepage connectivity and assigns the
+4-regime hazard classes, writing ``DATA_DIR/cache/<Facility>_coupled.zarr``.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from shapely.geometry import box
 
 from app.config import Settings, get_settings
 from app.pipelines.ingestion import PRODUCTS, download_and_crop, validate_bbox
+from app.pipelines.coupling import run_coupling
 from app.pipelines.hydrology import STREAM_THRESHOLD_CELLS, glo30_tile_names, run_hydrology
 from app.pipelines.kinematics import run_kinematics
 from app.pipelines.unmixing import find_l2bmin_for, run_spectral_pipeline
@@ -150,6 +156,15 @@ def build_parser() -> argparse.ArgumentParser:
     hyd.add_argument("--stream-threshold", type=int, default=STREAM_THRESHOLD_CELLS, help="Cells of accumulation that define a stream")
     hyd.add_argument("--output", type=Path, help="Output Zarr; default DATA_DIR/cache/<Facility>_hydrology.zarr")
     hyd.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
+
+    cpl = sub.add_parser("couple", help="Co-anomaly coupling and 4-regime hazard classification")
+    cpl.add_argument("--facility", required=True, type=_facility_name, help="Facility name, e.g. Sierrita")
+    cpl.add_argument("--spectral", type=Path, help="default DATA_DIR/cache/<Facility>_spectral.zarr")
+    cpl.add_argument("--kinematics", type=Path, help="default DATA_DIR/cache/<Facility>_kinematics.zarr")
+    cpl.add_argument("--hydrology", type=Path, help="default DATA_DIR/cache/<Facility>_hydrology.zarr")
+    cpl.add_argument("--earthworks", type=Path, help="Polygon vector file of active earthworks (REGIME_2)")
+    cpl.add_argument("--output", type=Path, help="default DATA_DIR/cache/<Facility>_coupled.zarr")
+    cpl.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser
 
 
@@ -431,6 +446,44 @@ def cmd_hydrology(args: argparse.Namespace, parser: argparse.ArgumentParser, set
             handler.close()
 
 
+def cmd_couple(args: argparse.Namespace, settings: Settings) -> int:
+    slug = facility_slug(args.facility)
+    display = KNOWN_FACILITIES.get(slug, {}).get("name", args.facility)
+    run_id = f"{slug}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    handlers = configure_logging(settings.log_dir / f"couple_{run_id}.log", args.log_level)
+    try:
+        inputs = {
+            "spectral": (args.spectral or settings.cache_dir / f"{display}_spectral.zarr", "unmix"),
+            "kinematics": (args.kinematics or settings.cache_dir / f"{display}_kinematics.zarr", "kinematics"),
+            "hydrology": (args.hydrology or settings.cache_dir / f"{display}_hydrology.zarr", "hydrology"),
+        }
+        missing = [f"{k} ({p}; run `{cmd}` first)" for k, (p, cmd) in inputs.items() if not Path(p).exists()]
+        if missing:
+            logger.error("Missing coupling inputs: %s", "; ".join(missing))
+            return 1
+        output = args.output or settings.cache_dir / f"{display}_coupled.zarr"
+        try:
+            summary = run_coupling(
+                display, inputs["spectral"][0], inputs["kinematics"][0], inputs["hydrology"][0], output,
+                earthworks_path=args.earthworks,
+            )
+        except Exception as exc:
+            logger.error("Coupling failed: %s: %s", type(exc).__name__, exc)
+            return 1
+        summary_path = settings.log_dir / f"{display}_coupled_{run_id}.json"
+        summary_path.write_text(json.dumps(summary, indent=2, default=str))
+        level = logging.WARNING if summary["facility_hazard_level"] != "NONE" else logging.INFO
+        logger.log(level, "Facility hazard level: %s; regimes %s", summary["facility_hazard_level"], summary["regime_counts"])
+        if summary["contains_synthetic_or_mock_inputs"]:
+            logger.warning("Inputs include synthetic/mock data: %s", summary["input_provenance"])
+        logger.info("Summary: %s", summary_path)
+        return 0
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -447,6 +500,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_kinematics(args, parser, settings)
     if args.command == "hydrology":
         return cmd_hydrology(args, parser, settings)
+    if args.command == "couple":
+        return cmd_couple(args, settings)
     parser.error(f"unknown command {args.command!r}")
     return 2
 

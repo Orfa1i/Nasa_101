@@ -8,7 +8,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 2 | Spectroscopy / NNLS unmixing | **Done**: tests pass. 245 active channels, not 242 (see below); not yet run on a real EMIT or EMITL2BMIN granule |
 | 3 | Kinematics / InSAR trend modelling | **Done**: tests pass. Timelines are biased late (see below); no real DISP-S1 stack or Brumadinho CSV has been run yet |
 | 4 | Hydrology / DSWx setback and flow routing | **Done**: tests pass and terrain/routing ran on real GLO-30 for Sierrita. The setback series has not run on real DSWx, and no crest line exists yet |
-| 5 | Co-anomaly coupling and regime classifier | Not started |
+| 5 | Co-anomaly coupling and regime classifier | **Done**: tests pass, including a full Phase 2→5 chain. No real classification exists yet (no real EMIT, DISP-S1 or DSWx data) |
 | 6 | API and database | Not started |
 | 7 | Audit copilot | Not started |
 | 8 | Next.js / deck.gl map | Not started |
@@ -420,4 +420,98 @@ This run produced terrain products only. DSWx was skipped because Earthdata is b
 * **Alerts can be triggered by pixel noise.** The −30 m shrink threshold equals one DSWx pixel, so a single-pixel shoreline flicker can trigger an alert. Consider requiring persistence over two or more valid epochs before acting on one.
 * **The DEM is a decade old.** GLO-30 is a surface model (it includes canopy and structures) built from TanDEM-X data acquired around 2011–2015. At an active tailings facility the embankments and beaches have changed since, so slopes and flow paths over the facility itself are historical.
 * **Coarse vegetation mask.** The NDVI comes from 60 m EMIT data (Phase 2) bilinearly resampled to 30 m, so it is coarse at the edges.
+
+---
+
+## Phase 5: Co-anomaly coupling and spatial-topological classifier
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `backend/app/pipelines/coupling.py` | The coupling step:<br>• grid alignment<br>• the D∞ DAG with acyclicity check and up/downslope propagation<br>• the aspect-path validator<br>• coupling rule, regime classifier, uncertainty model and alert tiers<br>• Zarr output |
+| `backend/app/main.py` | New CLI command `couple --facility NAME [--spectral] [--kinematics] [--hydrology] [--earthworks] [--output]`. Inputs default to the cache Zarrs of Phases 2–4, and a missing input names the command that produces it. |
+| `backend/tests/test_coupling.py` | 18 tests, including a full-chain contract test that runs the real Phase 2, 3 and 4 pipelines. |
+| `DECISIONS.md` | New. Design decisions for all phases, plus the classification results. |
+
+### Behaviour (details and reasons in `DECISIONS.md`, C1–C11)
+
+* **Alignment.** Every layer goes onto the Phase 4 grid (30 m, EPSG:32612).
+  * EMIT 60 m layers: bilinear for continuous values, nearest for flags.
+  * DISP-S1 layers: nearest.
+  * Grid identity is tested.
+* **DAG.** Built from D∞ receivers on the filled DEM. Acyclicity is asserted on every run, and up/downslope reachability uses linear passes in topological order.
+* **Coupling.** A candidate is a mid-slope kinematic anomaly (velocity or acceleration beyond 2σ). It is coupled when all of these hold:
+  * the pond boundary is a DAG ancestor;
+  * an SAI > 0.25 cell is a strict descendant;
+  * the setback is encroaching (Phase 4 alert at the latest valid epoch);
+  * Horn-aspect D8 paths independently confirm both links.
+* **Regimes.**
+  * REGIME_1 benign.
+  * REGIME_2 unobservable or anthropogenic: low coherence, or an earthworks polygon.
+  * REGIME_3 legacy seepage, Tier-1 watch.
+  * REGIME_4 active instability, Tier-3 critical, with a failure-time estimate ±2σ.
+  * Two extra codes: **0** rejected/unclassified (RMSE > 0.05, vegetated, missing data), and **5** kinematic anomaly with low SAI (outside the 4-regime scheme; see C5).
+  * Flag bits record low coherence, high RMSE, earthworks, vegetation, missing inputs, an SAI interval that straddles 0.25, and accelerating-not-coupled.
+* **Uncertainty (95 % bounds).**
+  * SAI: ±2 × 0.70 × RMSE (linear propagation through the endmember matrix).
+  * Velocity: GP and InSAR phase noise (Cramér–Rao, Sentinel-1 λ) combined.
+  * Acceleration: GP bounds.
+  * Failure time: the Phase 3 bounds.
+  * `low_confidence` marks cells with RMSE > 0.05 or coherence < 0.65.
+* **Output: `DATA_DIR/cache/<Facility>_coupled.zarr`.**
+  * Classification: `regime`, `alert_tier`, `classification_flags`, `low_confidence`.
+  * Aligned values with bounds: `sai*`, `velocity*`, `acceleration*`, `spectral_rmse`, `temporal_coherence`.
+  * Topology: `water_boundary`, `upslope_water`, `downslope_seepage`, `mid_slope`, `kinematic_anomaly`, `aspect_validated`, `coupled`.
+  * Failure time: `failure_days_*` and `failure_time_*`.
+  * Attributes: `facility_hazard_level`, `regime_counts`, `setback_state`, `input_provenance`, `contains_synthetic_or_mock_inputs` and the disclaimer. A JSON summary also goes to `DATA_DIR/logs/`.
+
+### Verification
+
+```
+$ cd backend && pytest
+151 passed, 4 skipped
+```
+
+`test_coupling.py` (18 passed) covers:
+
+* **Regimes and tiers:** every regime and alert tier on a 7-block scenario (codes 0–5, Tier-1 and Tier-3, all flags). REGIME_4 carries its failure time and the disclaimer.
+* **Scenario variations:**
+  * With no encroachment, A drops to REGIME_3.
+  * With aspect paths broken, D∞ still connects but validation fails, so A drops to REGIME_3.
+  * An earthworks polygon forces REGIME_2, both as a mask and through a GeoJSON file.
+  * A quiet facility comes out `NONE`.
+* **Alignment and topology:** grid identity after alignment; acyclicity and topological order on rough terrain; up/downslope propagation; aspect paths; water-boundary detection.
+* **Uncertainty:** the σ_SAI factor (0.70) and SAI bounds; the marginal-SAI flag; the phase-noise formula; the combined velocity interval.
+* **CLI:** the run writes `Sierrita_coupled.zarr` and reports synthetic provenance; missing inputs are reported.
+* **Full chain:** real Phase 2/3/4 pipeline code on a ~1 km synthetic site leads to REGIME_4 on the accelerating block and REGIME_3 on the seepage toe. This test found a real bug: Phase 3's CF `units: days` fields decode as `timedelta64[ns]`, and the coupler read nanoseconds as days. It is fixed with `as_days()`, and the unit fixture now carries the same units, so it fails without the fix.
+
+### Classification results
+
+See `DECISIONS.md` → *Results to date* for the full tables. In short:
+
+* **Real data:** none. Only GLO-30 terrain is real so far, and EMIT, DISP-S1 and DSWx inputs could not be fetched.
+* **Synthetic block scenario:** the facility level is CRITICAL_TIER3. Cell counts:
+
+  | Regime | Cells |
+  |--------|-------|
+  | 1 | 1348 |
+  | 2 | 16 |
+  | 3 | 196 |
+  | 4 | 12 |
+  | 5 | 16 |
+  | 0 | 12 |
+
+* **Synthetic full chain:** CRITICAL_TIER3, with 16 REGIME_4 cells. Failure estimates are 32–48 days, against a true 30 days.
+
+### Known gaps
+
+* **Single cells drive the facility level.** One REGIME_4 cell sets `CRITICAL_TIER3`; there is no minimum cluster size or persistence over time yet.
+* **`ALERT_TIER2` is never issued.** No regime defines it.
+* **Earthworks need an operator polygon.** There is no automatic detector.
+* **Strict coupling.** Coupling needs both a crest line (for the encroaching-setback test) and DSWx water. Without them, no cell can reach REGIME_4; the setback state records why.
+* **Facility-wide setback.** Encroachment is tested facility-wide (the latest valid epoch), not per shoreline segment.
+* **Edge resampling effects.**
+  * Bilinear 60 → 30 m resampling dilutes SAI at block edges, which creates code-5 fringes.
+  * Grid-edge cells have no Horn aspect, so they can't be aspect-validated.
 
