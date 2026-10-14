@@ -9,6 +9,8 @@
 | ``GET /api/facilities/{id}/layers`` | which matrix layers exist, with their sources and epochs |
 | ``GET /api/facilities/{id}/matrices?layer=&t=`` | one layer, reprojected to a ~30 m EPSG:4326 grid whose bounds are exactly the facility bbox |
 | ``GET /api/facilities/{id}/pixel?lat=&lon=`` | time series and values at a point (bilinear between cells, nearest for categories) |
+| ``GET /api/facilities/{id}/dashboard`` | the unified dashboard validation query (all inspection tools plus consistency checks) |
+| ``POST /api/facilities/{id}/audit`` | a validated GISTM screening brief, from the Claude copilot or the deterministic template |
 
 Errors:
 * 404: unknown facility, or a missing product or layer.
@@ -37,6 +39,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import layers as L
 from app.api.schemas import (
     Alert,
+    AuditRequest,
+    AuditResponse,
     ClassificationPoint,
     DataSource,
     Facility,
@@ -236,6 +240,56 @@ def facility_pixel(
     if all(getattr(resp, n) is None for n in sections):
         raise HTTPException(status_code=404, detail={"message": f"No data for {facility_id} at this point", "unavailable": resp.unavailable})
     return resp
+
+
+@router.get("/facilities/{facility_id}/dashboard", response_model=dict[str, Any])
+def facility_dashboard(request: Request, facility_id: str, cur: Any = Depends(get_cursor), settings: Settings = Depends(get_app_settings)) -> dict[str, Any]:
+    from app.agent.tools import InspectionTools, ToolError
+
+    facility_or_404(cur, facility_id)
+    try:
+        return InspectionTools(settings, request.app.state.db).dashboard_validation_query(facility_id)
+    except ToolError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/facilities/{facility_id}/audit", response_model=AuditResponse)
+def facility_audit(
+    request: Request,
+    facility_id: str,
+    body: AuditRequest = AuditRequest(),
+    cur: Any = Depends(get_cursor),
+    settings: Settings = Depends(get_app_settings),
+) -> AuditResponse:
+    import anthropic
+
+    from app.agent import copilot
+    from app.agent.tools import InspectionTools, ToolError
+
+    facility_or_404(cur, facility_id)
+    if body.mode == "llm" and not copilot.credentials_available() and getattr(request.app.state, "llm_client", None) is None:
+        raise HTTPException(status_code=503, detail="mode=llm needs Anthropic credentials (ANTHROPIC_API_KEY or `ant auth login`)")
+    tools = InspectionTools(settings, request.app.state.db)
+    try:
+        result = copilot.generate_audit(
+            tools, facility_id, query=body.query, mode=body.mode, client=getattr(request.app.state, "llm_client", None),
+            model=settings.LLM_MODEL, effort=settings.LLM_EFFORT,
+        )
+    except copilot.BriefValidationError as exc:
+        raise HTTPException(status_code=502, detail={"message": "brief failed grounding validation", "discrepancies": exc.discrepancies}) from exc
+    except copilot.AuditRefusedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except copilot.AuditError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ToolError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except anthropic.RateLimitError as exc:
+        raise HTTPException(status_code=503, detail=f"Claude API rate limited: {exc.message}") from exc
+    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Claude API error {exc.status_code}: {exc.message}") from exc
+    except anthropic.APIConnectionError as exc:
+        raise HTTPException(status_code=502, detail="Claude API unreachable") from exc
+    return AuditResponse(facility_id=facility_id, **result.as_dict())
 
 
 # --------------------------------------------------------------------------- #
@@ -442,15 +496,19 @@ def _classification_point(settings: Settings, prefix: str, x: float, y: float) -
 # --------------------------------------------------------------------------- #
 
 
-def create_app(settings: Optional[Settings] = None) -> FastAPI:
-    """Build the API. Settings default to the environment (``get_settings()``), read at start-up."""
+def create_app(settings: Optional[Settings] = None, *, llm_client: Any = None) -> FastAPI:
+    """Build the API. Settings default to the environment (``get_settings()``), read at start-up.
+
+    ``llm_client`` replaces the default ``anthropic.Anthropic()`` used by the audit copilot
+    (e.g. a configured client with a proxy, or a scripted client in offline tests).
+    """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cfg = settings or get_settings()
         db = Database(cfg.data_path / "lithocreep.duckdb")
         counts = db.initialize(cfg)
-        app.state.settings, app.state.db = cfg, db
+        app.state.settings, app.state.db, app.state.llm_client = cfg, db, llm_client
         logger.info("API ready: %s", counts)
         try:
             yield
@@ -470,7 +528,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
     app.include_router(router)

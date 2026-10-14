@@ -204,3 +204,30 @@ class Health(BaseModel):
     database: str
     facilities: int
     alerts: int
+
+
+class AuditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: Optional[str] = Field(None, max_length=2000, description="Free-text request; defaults to a GISTM brief request")
+    mode: Literal["auto", "llm", "deterministic"] = Field(
+        "auto", description="llm: Claude with tools; deterministic: template; auto: llm when credentials exist"
+    )
+
+
+class AuditToolCall(BaseModel):
+    tool: str
+    input: dict[str, Any]
+    ok: bool
+    error: Optional[str] = None
+
+
+class AuditResponse(BaseModel):
+    facility_id: str
+    generated_by: str
+    brief: dict[str, Any]
+    validation: dict[str, Any]
+    tool_calls: list[AuditToolCall]
+    turns: int
+    usage: dict[str, int]
+

@@ -7,6 +7,8 @@ in the working directory) via pydantic-settings:
   credentials used by ``earthaccess``. Both default to ``None``; without them
   ``earthaccess`` falls back to ``~/.netrc``.
 * ``CORS_ORIGINS`` - comma-separated origins allowed to call the API.
+* ``LLM_MODEL`` / ``LLM_EFFORT`` - Claude model and effort for the audit copilot
+  (default ``claude-opus-5-5`` / ``high``).
 * ``DATA_DIR`` - root of the local data store (default ``"../data"``). A
   relative path is resolved against the ``backend/`` directory, so the default
   always points at ``<repo>/data`` regardless of the current working directory.
@@ -56,6 +58,9 @@ class Settings(BaseSettings):
     DATA_DIR: str = "../data"
     # Comma-separated origins allowed by the API's CORS policy (the Next.js dev server by default).
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Audit copilot (Anthropic credentials are read by the SDK itself: ANTHROPIC_API_KEY, profile, ...).
+    LLM_MODEL: str = "claude-opus-5-5"
+    LLM_EFFORT: str = "high"
 
     @model_validator(mode="after")
     def _validate_data_dir(self) -> "Settings":

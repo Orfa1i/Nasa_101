@@ -142,7 +142,7 @@ def _alert_from_coupled(facility_id: str, path: Path) -> Optional[dict[str, Any]
             if ok.any():
                 i = int(np.argmin(np.where(ok, days, np.inf)))
                 last = pd.Timestamp(attrs.get("last_insar_epoch") or ds["failure_time_estimate"].values[r4][i])
-                failure = (last + pd.Timedelta(days=float(days[i]))).to_pydatetime() if abs(days[i]) < 73_000 else None
+                failure = (last + pd.Timedelta(days=float(days[i]))).floor("s").to_pydatetime() if abs(days[i]) < 73_000 else None
                 error_days = float(sig[i]) if np.isfinite(sig[i]) else None
     except Exception as exc:  # unreadable cache: skip, but say so
         logger.warning("Cannot read %s (%s: %s); no alert recorded", path, type(exc).__name__, exc)
@@ -163,7 +163,7 @@ def _alert_from_coupled(facility_id: str, path: Path) -> Optional[dict[str, Any]
         return None
     return {
         "facility_id": facility_id,
-        "timestamp": timestamp.to_pydatetime(),
+        "timestamp": timestamp.floor("s").to_pydatetime(),
         "hazard_level": hazard,
         "failure_date_est": failure,
         "failure_date_error_days": error_days,

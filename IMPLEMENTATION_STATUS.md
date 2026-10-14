@@ -10,7 +10,7 @@ Tracks progress against the phases in `IMPLEMENTATION_PLAYBOOK.md`.
 | 4 | Hydrology / DSWx setback and flow routing | **Done**: tests pass and terrain/routing ran on real GLO-30 for Sierrita. The setback series has not run on real DSWx, and no crest line exists yet |
 | 5 | Co-anomaly coupling and regime classifier | **Done**: tests pass, including a full Phase 2→5 chain. No real classification exists yet (no real EMIT, DISP-S1 or DSWx data) |
 | 6 | API and database | **Done**: tests pass, unmocked; serves real GLO-30 terrain for Sierrita. The other layers wait on real EMIT, DISP-S1 and DSWx inputs |
-| 7 | Audit copilot | Not started |
+| 7 | Audit copilot | **Done**: tests pass, including the Claude tool-use loop against a scripted client. No live Claude call has been made (no API credentials in this sandbox), and every brief so far was built from synthetic test products |
 | 8 | Next.js / deck.gl map | Not started |
 | 9 | Inspector panels | Not started |
 | 10 | Scenarios, backtest UI, CI | Not started |
@@ -607,3 +607,135 @@ $ cd backend && pytest
 * **Startup only.** The database is rebuilt at start-up, so new pipeline outputs appear after a restart.
 * **Bingham Canyon bbox is approximate** and needs confirming.
 
+---
+
+## Phase 7: Geotechnical audit copilot
+
+### Delivered
+
+| File | Purpose |
+|------|---------|
+| `backend/app/agent/tools.py` | `InspectionTools`: deterministic, read-only tools over the DuckDB registry and the cached Phase 2–5 Zarr products. Also holds the tool JSON schemas sent to Claude. |
+| `backend/app/agent/copilot.py` | `AuditCopilot`, the Claude tool-use loop that produces a GISTM screening brief. `validate_brief()` checks every number in the brief against the raw tool outputs. Also `compose_brief()` / `deterministic_brief()`, a template brief built from the same tools without an LLM. |
+| `backend/app/api/endpoints.py`, `schemas.py` | `GET /api/facilities/{id}/dashboard` and `POST /api/facilities/{id}/audit` (`AuditRequest` / `AuditResponse`). CORS now also allows `POST`. `create_app(llm_client=...)` lets tests inject a client. |
+| `backend/app/main.py` | New CLI command `audit --facility NAME [--query] [--mode auto\|llm\|deterministic] [--output]`. Writes the brief JSON to `DATA_DIR/logs/`. |
+| `backend/app/config.py` | `LLM_MODEL` (default `claude-opus-5-5`) and `LLM_EFFORT` (default `high`). |
+| `backend/app/database.py` | Alert timestamps are floored to whole seconds. Previously a nanosecond `to_pydatetime` warning dropped alerts under `-W error`. |
+| `backend/requirements.txt` | Adds `anthropic==1.13.0` and its HTTP dependency `httpx2==2.13.1`. |
+| `backend/tests/test_agent.py` | 21 test functions (34 cases plus 1 opt-in live test). |
+
+### Tools
+
+Every tool takes a `facility_id`, reads only local data and returns JSON. Values are rounded, dates are ISO, and an unknown facility raises `ToolError`.
+
+* **`fetch_dam_attributes(id)`** returns:
+  * the registry attributes;
+  * the latest alert: hazard level, earliest REGIME_4 failure date ± 2σ days, and regime counts;
+  * the screening risk class, mapped from the hazard level (`CRITICAL_TIER3` → `Tier-3 / Active Instability`, …, or `Indeterminate / Insufficient Data` with no alert);
+  * which products exist, whether a crest line exists, and the required disclaimer.
+* **`get_spectral_alerts(id)`** counts pixels with **SAI > 0.25**.
+  * It uses the coupled grid, which excludes the flags for low confidence, unobservable or masked pixels. It falls back to the Phase 2 spectral product.
+  * Three counts are reported: all high-SAI pixels, confident pixels (the whole 95 % interval is above 0.25), and pixels whose interval straddles 0.25.
+  * Also returned: confident area in ha, maximum SAI, and the top pixels with lon/lat.
+* **`get_kinematics(id)`** returns:
+  * accelerating pixels, and the accelerating mid-slope pixels on the coupled grid;
+  * the unobservable fraction;
+  * the earliest trend-instability date with its 95 % bounds, and accelerating pixels sorted by date, each with velocity, acceleration and `instability_time` / `_lower` / `_upper`;
+  * the Phase 3 late-bias note and the "not a failure forecast" disclaimer.
+* **`get_hydrological_setback(id)`** returns:
+  * the full D_crest(t) series: date, distance, status, change, and alert bits;
+  * the latest valid value, the minimum, and whether the pond is encroaching.
+* **`dashboard_validation_query(id)`** is the unified dashboard query. It returns:
+  * the four tools above;
+  * up to six cross-tool consistency checks, for example:
+  * the DB alert matches the coupled hazard;
+  * REGIME_4 cells appear only when the hazard is Tier-3;
+  * REGIME_4 cells are accelerating;
+  * the setback state matches hydrology;
+  * the DB failure date matches the coupled product.
+  * `gistm_screening`: candidate issues tagged with a GISTM principle, recommendations, and data limitations.
+
+### Copilot
+
+* **Claude API.** It uses the Anthropic Python SDK with a manual tool-use loop on `client.beta.messages.create`.
+  * Model `claude-opus-5-5`, `effort: high`.
+  * **Strict JSON-schema structured output** (`BRIEF_SCHEMA`) for the final brief.
+  * `strict: true` tool schemas. Parallel tool results are returned in one user message, and the message history is append-only.
+  * `refusal`, `max_tokens` and `pause_turn` stop reasons are handled.
+* **Brief shape:**
+  * `facility`, `facility_id`, `risk_classification` (enum, e.g. `"Tier-3 / Active Instability"`) and `hazard_level`;
+  * `executive_summary`;
+  * `spectral_evidence`, `kinematic_evidence` (with `prediction_windows` that each carry `estimate`, `lower_95` and `upper_95`) and `hydrological_evidence`, each made of a summary plus facts. Every fact is `{label, tool, path, value, unit}`, citing the JSON path in the tool output it came from;
+  * `compliance_issues` (`{gistm_principle, issue, evidence_paths}`);
+  * `recommendations`, `data_limitations` and `disclaimer`.
+* **Grounding rules in the system prompt:**
+  * Use only tool outputs, and call all four tools.
+  * Give no forecast without its 95 % bounds.
+  * Use no absolute or speculative language.
+  * Treat the GISTM mapping as screening only, not a compliance determination.
+* **Validation (`validate_brief`).** It runs on every brief, LLM or template, and raises `BriefValidationError` listing **every** discrepancy:
+  * All four required tools must have been called for the same facility (the dashboard query counts as all four).
+  * The facility name, risk class, hazard level and disclaimer must equal the tool values.
+  * Every fact's `value` must match the value at its cited `path`, within the rounding of the quoted digits.
+  * Every prediction window's estimate and bounds must match the pixel entry it cites.
+  * Every number and date in the prose must appear somewhere in the raw tool outputs, and any trend-instability date in the prose must be a cited window estimate.
+  * Banned language is rejected: *inevitable*, *guaranteed*, *will collapse/fail/breach*, *certain to fail*, *imminent failure*, *no risk*, *completely safe*, *predicted collapse date*. A directly preceding negation is allowed (e.g. "results are not guaranteed"), but "Without action an inevitable collapse follows" is still rejected.
+* **Loop control.**
+  * If Claude answers before calling all four tools, it is nudged up to twice, then the run fails.
+  * Tool errors go back as `is_error` tool results.
+  * A brief for the wrong facility is rejected.
+  * The run is capped at 12 turns.
+* **Server-side refusal fallback is on by default.** Requests carry the `server-side-fallback-2026-07-01` beta with `fallbacks="default"`, so a policy refusal is retried server-side on a fallback model instead of failing. `AuditCopilot(use_fallbacks=False)` turns it off.
+* **Modes.**
+  * `llm` needs credentials (`ANTHROPIC_API_KEY` or a configured profile); otherwise the API returns 503.
+  * `deterministic` builds the brief from `compose_brief(dashboard)` with no LLM and tags it `generated_by: deterministic-template`.
+  * `auto` uses Claude when credentials exist, otherwise the template.
+  * Both paths go through the same validator.
+* **API errors.**
+  * 404: unknown facility.
+  * 422: a bad request body.
+  * 502: a validation failure (detail includes the discrepancy list), a refusal, or an Anthropic API error.
+  * 503: no credentials, unreadable products, or a rate limit.
+
+### Verification
+
+```
+$ cd backend && pytest
+203 passed, 5 skipped
+$ pytest tests/test_agent.py
+34 passed, 1 skipped
+```
+
+`test_agent.py` runs the real Phase 2–5 pipelines on a synthetic site inside the Sierrita bbox, then exercises the tools, validator, copilot loop, API and CLI against those real products. It covers:
+
+* **Tools against raw Zarr.** SAI counts, kinematic dates and bounds, and the D_crest series are recomputed directly from the Zarr files and must match. The dashboard query passes all six consistency checks.
+  * On the synthetic site the brief reports `Tier-3 / Active Instability`.
+  * Spectral: 82 confident high-SAI pixels (7.38 ha).
+  * Kinematics: 40 accelerating pixels; the earliest trend-instability date is 2025-01-08 [95 %: 2024-12-29, 2025-01-19].
+  * Setback: latest D_crest 90.0 m, down 60.0 m, encroaching.
+  * **These numbers are synthetic test values, not observations of Sierrita.**
+* **Deterministic briefs** validate for all four registry facilities. A facility without products gets an `Indeterminate / Insufficient Data` dashboard with a failed `coupled_product_present` check; nothing is invented.
+* **Validator.** It rejects 12 tampered briefs:
+  * a changed fact value or a broken path;
+  * an invented prose number or date;
+  * three speculative phrasings;
+  * a wrong risk class, hazard level or disclaimer;
+  * a shifted 95 % bound, or the windows removed.
+
+  It also rejects a brief whose tool calls miss one of the four required tools. It accepts negated wording and rounded values.
+* **Copilot loop.** A scripted client returns real SDK `BetaMessage` objects, so no network is used. The tests cover:
+  * The query "Generate regulatory GISTM inspection brief for Sierrita Complex" calls all four tools in parallel, returns their results in one message, and yields a validated brief.
+  * Request shape: strict tools, no forced `tool_choice`, the structured-output schema, the fallback beta, and append-only history.
+  * The nudge when tools are skipped, and the dashboard query standing in for the four tools.
+  * A hallucinated number raises `BriefValidationError`.
+  * Tool errors, refusals, a wrong-facility brief and the turn limit.
+* **API and CLI.** The audit endpoint is tested in deterministic mode (200), LLM mode without credentials (503), with an unknown facility (404) and with a bad body (422). It is also tested with injected good and hallucinating clients (200 and 502), along with the dashboard endpoint and `main.py audit`.
+* **Live test.** `LITHOCREEP_LIVE_LLM=1 pytest tests/test_agent.py -k live` runs one real Claude audit when credentials are present. It is skipped here.
+
+### Known gaps
+
+* **No live Claude run yet.** The sandbox has no Anthropic credentials. The loop is tested against scripted responses built from real SDK types, but how the real model behaves (tool order, wording that passes the validator, and so on) is unverified. Run the opt-in live test before relying on `llm` mode.
+* **The GISTM mapping needs expert review.** Issues are tagged with principles 2, 6, 7, 9 and 13, paraphrased from GISTM (2020) rather than quoted. This is a screening aid: a qualified engineer must review it before it is used in any regulatory setting.
+* **No real-data brief.** Every product the agent reads is still synthetic or partial (see Phases 2–6), so no real facility brief exists.
+* **The prose check is lexical.** It confirms that every number and date in the prose exists in the tool outputs, but not that it is attached to the right quantity in the sentence. Structured facts and windows are checked exactly against their cited paths.
+* **Cost and latency are unmeasured.** A Claude audit makes at least two requests (tool calls, then the brief), with tool outputs of a few kB each.
