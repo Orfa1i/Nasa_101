@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch the full stack locally on the SYNTHETIC demo site (clearly labelled in the UI):
 #   backend  http://127.0.0.1:8000  (FastAPI, DATA_DIR=.demo-data)
-#   frontend http://127.0.0.1:3000  (Next.js production build, proxies /api to the backend)
+#   frontend http://127.0.0.1:3300  (Next.js production build, proxies /api to the backend; WEB_PORT overrides)
 # Use DATA_DIR=/path/to/real/data scripts/run_demo.sh to serve real pipeline outputs instead.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,10 +19,11 @@ echo "==> backend on :8000"
 API=$!
 trap 'kill $API ${WEB:-} 2>/dev/null || true' EXIT INT TERM
 
-echo "==> frontend build + start on :3000"
+WEB_PORT="${WEB_PORT:-3300}"
+echo "==> frontend build + start on :$WEB_PORT"
 cd "$ROOT/frontend"
 [ -d .next ] || npm run build
-LITHOCREEP_API_URL=http://127.0.0.1:8000 npx next start -p 3000 -H 127.0.0.1 &
+LITHOCREEP_API_URL=http://127.0.0.1:8000 npx next start -p "$WEB_PORT" -H 127.0.0.1 &
 WEB=$!
-echo "Open http://127.0.0.1:3000  (Ctrl-C stops both servers)"
+echo "Open http://127.0.0.1:$WEB_PORT  (Ctrl-C stops both servers)"
 wait

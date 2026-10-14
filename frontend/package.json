@@ -4,9 +4,9 @@
   "private": true,
   "description": "LithoCreep tailings screening map (Next.js + deck.gl)",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 3300",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 3300",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

@@ -25,7 +25,7 @@ Requirements: Python 3.9–3.11 (duckdb 0.9.2 has no 3.12 wheel) and Node ≥ 18
 
 ```bash
 scripts/setup.sh       # backend/.venv with the exact pins, frontend npm ci, .env templates
-scripts/run_demo.sh    # SYNTHETIC demo site -> http://127.0.0.1:3000 (API on :8000)
+scripts/run_demo.sh    # SYNTHETIC demo site -> http://127.0.0.1:3300 (API on :8000)
 scripts/verify.sh      # every check CI runs (SKIP_E2E=1 to skip the browser tests)
 ```
 

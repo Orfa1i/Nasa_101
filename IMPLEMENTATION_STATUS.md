@@ -577,7 +577,7 @@ See `DECISIONS.md` → *Results to date* for the full tables. In short:
   * 422: bad layer, time or coordinates.
   * 503: product files exist but none can be read.
   * Unreadable caches **fall back** to the layer's next source (e.g. `sai` from the coupled product falls back to the spectral product), with a note. They are skipped for alerts, and the pixel endpoint reports them per section without failing.
-* **CORS.** Origins come from `CORS_ORIGINS` (default `http://localhost:3000,http://127.0.0.1:3000`), methods `GET` and `OPTIONS`.
+* **CORS.** Origins come from `CORS_ORIGINS` (default `http://localhost:3300,http://127.0.0.1:3300`), methods `GET` and `OPTIONS`.
 
 ### Verification
 

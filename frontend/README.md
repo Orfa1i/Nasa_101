@@ -14,7 +14,7 @@ DATA_DIR=/tmp/lithocreep-demo uvicorn app.main:app --port 8000
 # frontend
 cd frontend
 npm ci
-npm run build && npm start        # or: npm run dev
+npm run build && npm start        # http://127.0.0.1:3300 (or: npm run dev)
 ```
 
 The browser calls same-origin `/api/*`; `next.config.js` proxies it to `LITHOCREEP_API_URL`

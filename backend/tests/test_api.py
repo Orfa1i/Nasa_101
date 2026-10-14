@@ -383,8 +383,8 @@ def test_brumadinho_pixel_reads_historic_csv(tmp_path):
 
 
 def test_cors_policy(client):
-    ok = client.options("/api/facilities", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"})
-    assert ok.status_code == 200 and ok.headers["access-control-allow-origin"] == "http://localhost:3000"
+    ok = client.options("/api/facilities", headers={"Origin": "http://localhost:3300", "Access-Control-Request-Method": "GET"})
+    assert ok.status_code == 200 and ok.headers["access-control-allow-origin"] == "http://localhost:3300"
     bad = client.get("/api/facilities", headers={"Origin": "http://evil.example"})
     assert "access-control-allow-origin" not in bad.headers
 

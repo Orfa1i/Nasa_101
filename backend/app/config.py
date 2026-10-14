@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     EARTHDATA_PASSWORD: Optional[str] = None
     DATA_DIR: str = "../data"
     # Comma-separated origins allowed by the API's CORS policy (the Next.js dev server by default).
-    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    CORS_ORIGINS: str = "http://localhost:3300,http://127.0.0.1:3300"
     # Audit copilot (Anthropic credentials are read by the SDK itself: ANTHROPIC_API_KEY, profile, ...).
     LLM_MODEL: str = "claude-opus-5-5"
     LLM_EFFORT: str = "high"
